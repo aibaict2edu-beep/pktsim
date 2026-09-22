@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PacketPath — TCP/IPネットワーク・シミュレータ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 28 28" width="28" height="28">
+          <circle cx="6" cy="6" r="3" fill="currentColor"/>
+          <circle cx="22" cy="6" r="3" fill="currentColor"/>
+          <circle cx="14" cy="22" r="3" fill="currentColor"/>
+          <path d="M6 9 L14 19 M22 9 L14 19" stroke="currentColor" stroke-width="1.6" fill="none"/>
+        </svg>
+      </span>
+      <div class="brand-text">
+        <h1>PacketPath</h1>
+        <p>TCP/IP &amp; ルーティング動作シミュレータ</p>
+      </div>
+    </div>
+
+    <nav class="tabs" role="tablist" aria-label="トポロジモード">
+      <button class="tab-btn is-active" id="tab-fixed" role="tab" aria-selected="true" aria-controls="panel-fixed">固定トポロジ</button>
+      <button class="tab-btn" id="tab-free" role="tab" aria-selected="false" aria-controls="panel-free">自由配置</button>
+    </nav>
+  </header>
+
+  <!-- ===================== 固定トポロジ ===================== -->
+  <main class="panel" id="panel-fixed" role="tabpanel" aria-labelledby="tab-fixed">
+
+    <section class="stage">
+      <div class="stage-toolbar">
+        <div class="toolbar-group">
+          <label class="field-label" for="rt-mode">ルーティングテーブル</label>
+          <select id="rt-mode" class="select">
+            <option value="preset">プリセット（設定済み）</option>
+            <option value="manual">手動編集</option>
+          </select>
+        </div>
+        <div class="toolbar-group">
+          <label class="field-label" for="fail-rate">自動障害発生確率</label>
+          <input type="range" id="fail-rate" min="0" max="60" step="5" value="15">
+          <output id="fail-rate-out" class="field-value">15%</output>
+        </div>
+        <button class="btn btn-ghost" id="reset-links">全リンク復旧</button>
+      </div>
+
+      <div class="stage-canvas-wrap">
+        <svg id="topo-svg" class="topo-svg" viewBox="0 0 1120 560" preserveAspectRatio="xMidYMid meet" aria-label="ネットワーク構成図"></svg>
+        <p class="stage-hint">リンクをクリックしてコスト編集／障害トグル。ノードにカーソルを合わせるとIP・MACを表示。</p>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+
+      <section class="card">
+        <h2 class="card-title">パケット送信</h2>
+        <div class="field-row">
+          <label class="field-label" for="src-pc">送信元 PC</label>
+          <select id="src-pc" class="select"></select>
+        </div>
+        <div class="field-row">
+          <label class="field-label" for="dst-pc">宛先 PC</label>
+          <select id="dst-pc" class="select"></select>
+        </div>
+        <button class="btn btn-primary" id="send-btn">パケットを送信</button>
+        <p class="micro-hint" id="send-status"></p>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">経路コスト比較</h2>
+        <div id="route-compare" class="route-compare">
+          <p class="empty-note">送信するとここに3経路のコストが表示されます。</p>
+        </div>
+      </section>
+
+      <section class="card card-grow">
+        <div class="card-title-row">
+          <h2 class="card-title">ログ</h2>
+          <button class="btn btn-mini" id="clear-log">クリア</button>
+        </div>
+        <div id="log" class="log" aria-live="polite"></div>
+      </section>
+
+      <section class="card" id="routing-table-card">
+        <h2 class="card-title">ルーティングテーブル（中継ルーター）</h2>
+        <div id="routing-table" class="routing-table"></div>
+      </section>
+
+    </aside>
+  </main>
+
+  <!-- ===================== 自由配置 ===================== -->
+  <main class="panel is-hidden" id="panel-free" role="tabpanel" aria-labelledby="tab-free" hidden>
+
+    <section class="stage">
+      <div class="stage-toolbar">
+        <div class="toolbar-group free-tools">
+          <span class="field-label">ノード追加</span>
+          <button class="btn btn-tool" data-add="pc">＋ PC</button>
+          <button class="btn btn-tool" data-add="switch">＋ スイッチ</button>
+          <button class="btn btn-tool" data-add="router">＋ ルーター</button>
+        </div>
+        <div class="toolbar-group free-tools">
+          <span class="field-label">操作モード</span>
+          <button class="btn btn-tool is-active" data-mode="move" id="mode-move">移動</button>
+          <button class="btn btn-tool" data-mode="link" id="mode-link">接続</button>
+          <button class="btn btn-tool" data-mode="delete" id="mode-delete">削除</button>
+        </div>
+        <button class="btn btn-ghost" id="free-clear">全消去</button>
+      </div>
+
+      <div class="stage-canvas-wrap">
+        <svg id="free-svg" class="topo-svg" viewBox="0 0 1120 560" preserveAspectRatio="xMidYMid meet" aria-label="自由配置ネットワーク構成図"></svg>
+        <p class="stage-hint" id="free-hint">「接続」モードで2つのノードを順にクリックするとリンクを作成します。</p>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+
+      <section class="card">
+        <h2 class="card-title">パケット送信</h2>
+        <div class="field-row">
+          <label class="field-label" for="free-src-pc">送信元 PC</label>
+          <select id="free-src-pc" class="select"></select>
+        </div>
+        <div class="field-row">
+          <label class="field-label" for="free-dst-pc">宛先 PC</label>
+          <select id="free-dst-pc" class="select"></select>
+        </div>
+        <button class="btn btn-primary" id="free-send-btn">パケットを送信</button>
+        <p class="micro-hint" id="free-send-status"></p>
+      </section>
+
+      <section class="card card-grow">
+        <div class="card-title-row">
+          <h2 class="card-title">ログ</h2>
+          <button class="btn btn-mini" id="free-clear-log">クリア</button>
+        </div>
+        <div id="free-log" class="log" aria-live="polite"></div>
+      </section>
+
+    </aside>
+  </main>
+
+</div>
+
+<div class="modal-backdrop is-hidden" id="cost-modal-backdrop">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cost-modal-title">
+    <h3 id="cost-modal-title">リンクのコスト設定</h3>
+    <p class="modal-sub" id="cost-modal-sub"></p>
+    <label class="field-label" for="cost-input">メトリック（コスト）</label>
+    <input type="number" id="cost-input" class="cost-input" min="1" max="99" value="1">
+    <label class="modal-check">
+      <input type="checkbox" id="cost-down-check">
+      このリンクを障害（ダウン）状態にする
+    </label>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="cost-cancel">キャンセル</button>
+      <button class="btn btn-primary" id="cost-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
