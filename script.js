@@ -552,11 +552,59 @@
 
     logFn('sys', `送信開始: ${src.name} (${src.ip || '—'}) → ${dst.name} (${dst.ip || '—'})`, t); t += STEP;
 
-    if (opts.onRouteComputed) opts.onRouteComputed(result);
-
     if (!result.reachable) {
+      if (opts.onRouteComputed) opts.onRouteComputed(result, { failureOnPath: false, reachedPath: null, failureLink: null });
       logFn('fail', '到達可能な経路がありません（経路上の全リンクが障害中です）', t);
       if (opts.onFinish) setTimeout(() => opts.onFinish(result), t + 200);
+      return;
+    }
+
+    // 経路上のリンクID集合
+    const pathLinkIds = new Set();
+    for (let i = 0; i < result.path.length - 1; i++) {
+      const l = findLinkBetween(topology, result.path[i], result.path[i + 1]);
+      if (l) pathLinkIds.add(l.id);
+    }
+
+    // 送信直後（ARP解決あたり）に自動障害を抽選。3経路すべてのリンクが対象。
+    let failureLink = null;
+    if (opts.failRate) {
+      const upRoutable = topology.links.filter((l) => l.routable && !l.down);
+      if (upRoutable.length && Math.random() * 100 < opts.failRate) {
+        failureLink = upRoutable[Math.floor(Math.random() * upRoutable.length)];
+      }
+    }
+    const failureOnPath = !!(failureLink && pathLinkIds.has(failureLink.id));
+
+    let reachedPath = null;
+    if (failureOnPath) {
+      let brokenAt = -1;
+      for (let i = 0; i < result.path.length - 1; i++) {
+        const l = findLinkBetween(topology, result.path[i], result.path[i + 1]);
+        if (l && l.id === failureLink.id) { brokenAt = i; break; }
+      }
+      reachedPath = brokenAt >= 0 ? result.path.slice(0, brokenAt + 1) : [srcId];
+    }
+
+    if (opts.onRouteComputed) opts.onRouteComputed(result, { failureOnPath, reachedPath, failureLink });
+
+    if (failureLink) {
+      failureLink.down = true;
+      const na = topology.nodes.get(failureLink.a), nb = topology.nodes.get(failureLink.b);
+      const label = `${na ? na.name : failureLink.a} — ${nb ? nb.name : failureLink.b}`;
+      const failLogDelay = t;
+      if (failureOnPath) {
+        logFn('fail', `【自動障害】${label} でリンク障害が発生しました（今回の送信が失敗します）`, t); t += STEP;
+      } else {
+        logFn('fail', `【自動障害】${label} でリンク障害が発生しました（次回送信から経路に反映されます）`, t); t += STEP;
+      }
+      if (opts.onLinkDown) setTimeout(() => opts.onLinkDown(), failLogDelay + 40);
+    }
+
+    if (failureOnPath) {
+      const lastNode = topology.nodes.get(reachedPath[reachedPath.length - 1]);
+      logFn('fail', `${lastNode.name} 付近で経路が途絶えました。送信失敗（不通）`, t); t += STEP;
+      if (opts.onFinish) setTimeout(() => opts.onFinish({ reachable: false, path: [], cost: Infinity }), t + 200);
       return;
     }
 
@@ -734,16 +782,6 @@
     });
   }
 
-  function fixedMaybeTriggerFailure() {
-    if (Math.random() * 100 >= Fixed.failRate) return;
-    const upLinks = Fixed.topo.links.filter((l) => l.routable && !l.down);
-    if (upLinks.length === 0) return;
-    const victim = upLinks[Math.floor(Math.random() * upLinks.length)];
-    victim.down = true;
-    fixedLog('fail', `【自動障害】${victim.id.toUpperCase()} でリンク障害が発生しました（次回送信から経路に反映されます）`);
-    fixedRender();
-  }
-
   /* ---- ルーティングテーブル ポップオーバー（クリックしたルーターの経路情報） ---- */
 
   function fixedRoutingTableHtml(router) {
@@ -813,25 +851,26 @@
     statusEl.textContent = '送信中…';
 
     const sendOpts = {
-      onRouteComputed: (result) => {
+      failRate: Fixed.failRate,
+      onLinkDown: () => fixedRender(),
+      onRouteComputed: (result, info) => {
         if (result.reachable) {
           const costs = getRouteCosts(Fixed.topo);
           const chosen = costs.find((c) => result.path.includes(c.mid));
           sendOpts.routeLabel = chosen ? `${chosen.label}（RT-S→${chosen.key}→RT-R）` : null;
         }
         // 経路比較パネルは選択結果を強調
-        renderRouteCompareWithChoice(result);
+        renderRouteCompareWithChoice(result, info);
       },
       routeLabel: null,
       onFinish: (result) => {
         statusEl.textContent = result.reachable ? '送信完了' : '送信失敗（不通）';
-        fixedMaybeTriggerFailure();
       }
     };
     simulateSend(Fixed.topo, srcId, dstId, fixedLog, Fixed.svg, sendOpts);
   }
 
-  function renderRouteCompareWithChoice(result) {
+  function renderRouteCompareWithChoice(result, info) {
     const wrap = document.getElementById('route-compare');
     const costs = getRouteCosts(Fixed.topo);
     wrap.innerHTML = '';
@@ -847,7 +886,11 @@
     });
 
     if (result.reachable) {
-      startFlow(Fixed, Fixed.topo, result.path, fixedRender);
+      if (info && info.failureOnPath && info.reachedPath) {
+        startFlow(Fixed, Fixed.topo, info.reachedPath, fixedRender);
+      } else {
+        startFlow(Fixed, Fixed.topo, result.path, fixedRender);
+      }
     } else {
       fixedRender();
     }
@@ -993,7 +1036,8 @@
     nodeErrors: new Map(),
     driftEnabled: false,
     driftFailRate: 5,
-    driftTimer: null
+    driftTimer: null,
+    failRate: 15
   };
 
   function freeLog(level, msg, delay) { makeLogger(Free.logEl, Free.logBadge)(level, msg, delay); }
@@ -1496,8 +1540,16 @@
     if (freeHasAnyError()) { statusEl.textContent = 'IPアドレス設定にエラーがあるため送信できません。'; return; }
     statusEl.textContent = '送信中…';
     simulateSend(Free.topo, srcId, dstId, freeLog, Free.svg, {
-      onRouteComputed: (result) => {
-        if (result.reachable) startFlow(Free, Free.topo, result.path, freeRender);
+      failRate: Free.failRate,
+      onLinkDown: () => freeRender(),
+      onRouteComputed: (result, info) => {
+        if (result.reachable) {
+          if (info && info.failureOnPath && info.reachedPath) {
+            startFlow(Free, Free.topo, info.reachedPath, freeRender);
+          } else {
+            startFlow(Free, Free.topo, result.path, freeRender);
+          }
+        }
       },
       onFinish: (result) => { statusEl.textContent = result.reachable ? '送信完了' : '送信失敗（不通）'; }
     });
@@ -1544,6 +1596,13 @@
       Free.logEl.innerHTML = '';
       Free.logBadge.hidden = true;
       Free.logBadge.textContent = '0';
+    });
+
+    const freeFailRateInput = document.getElementById('free-fail-rate');
+    const freeFailRateOut = document.getElementById('free-fail-rate-out');
+    freeFailRateInput.addEventListener('input', () => {
+      Free.failRate = parseInt(freeFailRateInput.value, 10);
+      freeFailRateOut.textContent = Free.failRate + '%';
     });
 
     document.getElementById('free-drift-toggle').addEventListener('change', (e) => {

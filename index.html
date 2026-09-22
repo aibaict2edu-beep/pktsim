@@ -125,6 +125,11 @@
           <button class="btn btn-tool" data-mode="delete" id="mode-delete">削除</button>
         </div>
         <div class="toolbar-group">
+          <label class="field-label" for="free-fail-rate">自動障害発生確率</label>
+          <input type="range" id="free-fail-rate" min="0" max="60" step="5" value="15">
+          <output id="free-fail-rate-out" class="field-value">15%</output>
+        </div>
+        <div class="toolbar-group">
           <label class="check-label" for="free-drift-toggle">
             <input type="checkbox" id="free-drift-toggle">
             時間経過でコスト自動変動
