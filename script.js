@@ -312,6 +312,63 @@
     });
   }
 
+  /* ---- メッシュ接続（RT-A—RT-B、RT-B—RT-C）: 固定トポロジのみ ---- */
+
+  const MESH_LINK_DEFS = [
+    { id: 'rt-a_rt-b', a: 'rt-a', b: 'rt-b', label: 'RT-A — RT-B' },
+    { id: 'rt-b_rt-c', a: 'rt-b', b: 'rt-c', label: 'RT-B — RT-C' }
+  ];
+  const MESH_DEFAULT_COST = 3;
+
+  function addMeshLinks(topo) {
+    MESH_LINK_DEFS.forEach((md) => {
+      if (topo.links.some((l) => l.id === md.id)) return;
+      topo.links.push({ id: md.id, a: md.a, b: md.b, cost: MESH_DEFAULT_COST, down: false, routable: true, mesh: true });
+    });
+  }
+
+  function removeMeshLinks(topo) {
+    MESH_LINK_DEFS.forEach((md) => {
+      const l = topo.links.find((x) => x.id === md.id);
+      if (l && l._recoveryTimer) { clearTimeout(l._recoveryTimer); l._recoveryTimer = null; }
+    });
+    topo.links = topo.links.filter((l) => !l.mesh);
+  }
+
+  // RT-SからRT-Rまでの「ルーターのみを通る単純経路」をすべて列挙する（メッシュ有効時の経路比較用）
+  function enumerateRouterPaths(topology, srcId, dstId) {
+    const routerIds = new Set();
+    topology.nodes.forEach((n, id) => { if (n.type === 'router') routerIds.add(id); });
+    const adj = new Map();
+    routerIds.forEach((id) => adj.set(id, []));
+    topology.links.forEach((l) => {
+      if (!l.routable || !routerIds.has(l.a) || !routerIds.has(l.b)) return;
+      adj.get(l.a).push({ to: l.b, link: l });
+      adj.get(l.b).push({ to: l.a, link: l });
+    });
+    const results = [];
+    function dfs(current, visited, path, cost, hasDown) {
+      if (current === dstId) { results.push({ path: path.slice(), cost, down: hasDown }); return; }
+      (adj.get(current) || []).forEach((edge) => {
+        if (visited.has(edge.to)) return;
+        visited.add(edge.to);
+        path.push(edge.to);
+        dfs(edge.to, visited, path, cost + edge.link.cost, hasDown || edge.link.down);
+        path.pop();
+        visited.delete(edge.to);
+      });
+    }
+    dfs(srcId, new Set([srcId]), [srcId], 0, false);
+    return results;
+  }
+
+  function extractRouterSubpath(topology, fullPath) {
+    return fullPath.filter((id) => {
+      const n = topology.nodes.get(id);
+      return n && n.type === 'router';
+    });
+  }
+
   /* ------------------------------------------------------------------ *
    * 3. SVG 描画
    * ------------------------------------------------------------------ */
@@ -383,6 +440,7 @@
       const clickable = l.routable !== false || state.freeMode;
       let cls = 'link-line';
       if (clickable) cls += ' is-routable';
+      if (l.mesh) cls += ' is-mesh';
       if (l.down) cls += ' is-down';
       if (isActive) cls += ' is-active-path';
       html += `<line class="${cls}" data-link-id="${l.id}" x1="${pts.x1}" y1="${pts.y1}" x2="${pts.x2}" y2="${pts.y2}"></line>`;
@@ -391,9 +449,10 @@
       if (l.routable) {
         const mx = (pts.x1 + pts.x2) / 2, my = (pts.y1 + pts.y2) / 2;
         const label = l.down ? 'DOWN' : String(l.cost);
-        const bw = l.down ? 40 : 18;
-        html += `<rect class="link-cost-bg" x="${mx - bw / 2}" y="${my - 9}" width="${bw}" height="16" rx="3"></rect>`;
-        html += `<text class="link-cost${l.down ? ' is-down' : ''}" x="${mx}" y="${my + 3}" text-anchor="middle">${label}</text>`;
+        const bw = l.down ? 52 : 24;
+        const bh = l.down ? 20 : 19;
+        html += `<rect class="link-cost-bg" x="${mx - bw / 2}" y="${my - bh / 2}" width="${bw}" height="${bh}" rx="3"></rect>`;
+        html += `<text class="link-cost${l.down ? ' is-down' : ''}" x="${mx}" y="${my + 5}" text-anchor="middle">${label}</text>`;
       }
     });
 
@@ -805,7 +864,9 @@
     driftTimer: null,
     openPopoverNodeId: null,
     autoRecoverEnabled: false,
-    speedFactor: 1
+    speedFactor: 1,
+    meshEnabled: false,
+    lastChosenPath: null
   };
 
   function fixedLog(level, msg, delay) {
@@ -814,7 +875,7 @@
 
   function fixedRender() {
     renderTopology(Fixed.svg, Fixed.topo, { hoverNodeId: Fixed.hoverNodeId, flows: Fixed.flows, speedFactor: Fixed.speedFactor });
-    fixedRenderRouteCompare();
+    fixedRenderRouteCompare(Fixed.lastChosenPath);
     fixedRenderRoutingTable();
     if (Fixed.openPopoverNodeId) {
       const n = Fixed.topo.nodes.get(Fixed.openPopoverNodeId);
@@ -822,20 +883,57 @@
     }
   }
 
-  function fixedRenderRouteCompare() {
+  function fixedRenderRouteCompare(chosenFullPath) {
     const wrap = document.getElementById('route-compare');
-    const costs = getRouteCosts(Fixed.topo);
-    const best = Math.min(...costs.filter((c) => !c.down).map((c) => c.cost), Infinity);
     wrap.innerHTML = '';
-    costs.forEach((c) => {
+
+    if (!Fixed.meshEnabled) {
+      const costs = getRouteCosts(Fixed.topo);
+      const best = Math.min(...costs.filter((c) => !c.down).map((c) => c.cost), Infinity);
+      costs.forEach((c) => {
+        const row = el('div', 'route-row');
+        const isChosen = chosenFullPath ? chosenFullPath.includes(c.mid) : (!c.down && c.cost === best);
+        if (c.down) row.classList.add('is-unavailable');
+        else if (isChosen) row.classList.add('is-chosen');
+        row.innerHTML = `<span class="route-tag">${c.key}</span>
+          <span>RT-S → ${c.mid.toUpperCase()} → RT-R</span>
+          <span class="route-cost">${c.down ? '不通' : 'コスト ' + c.cost}</span>`;
+        wrap.appendChild(row);
+      });
+      return;
+    }
+
+    // メッシュ有効時：ルーターのみを通る単純経路をすべて列挙し、コスト最小の上位5件（同コストは含める）
+    const all = enumerateRouterPaths(Fixed.topo, 'rt-s', 'rt-r');
+    all.forEach((p) => { p.effCost = p.down ? Infinity : p.cost; });
+    all.sort((a, b) => a.effCost - b.effCost);
+    const top = [];
+    let cutoff = null;
+    for (let i = 0; i < all.length; i++) {
+      if (top.length < 5) {
+        top.push(all[i]);
+        if (top.length === 5) cutoff = all[i].effCost;
+      } else if (all[i].effCost === cutoff) {
+        top.push(all[i]);
+      } else {
+        break;
+      }
+    }
+    const chosenRouterPath = chosenFullPath ? extractRouterSubpath(Fixed.topo, chosenFullPath) : null;
+    top.forEach((p, idx) => {
       const row = el('div', 'route-row');
-      if (c.down) row.classList.add('is-unavailable');
-      else if (c.cost === best) row.classList.add('is-chosen');
-      row.innerHTML = `<span class="route-tag">${c.key}</span>
-        <span>RT-S → ${c.mid.toUpperCase()} → RT-R</span>
-        <span class="route-cost">${c.down ? '不通' : 'コスト ' + c.cost}</span>`;
+      const label = p.path.map((id) => Fixed.topo.nodes.get(id).name).join('→');
+      const isChosen = chosenRouterPath && JSON.stringify(chosenRouterPath) === JSON.stringify(p.path);
+      if (p.down) row.classList.add('is-unavailable');
+      else if (isChosen) row.classList.add('is-chosen');
+      row.innerHTML = `<span class="route-tag">${idx + 1}</span>
+        <span>${label}</span>
+        <span class="route-cost">${p.down ? '不通' : 'コスト ' + p.cost}</span>`;
       wrap.appendChild(row);
     });
+    if (top.length === 0) {
+      wrap.innerHTML = '<p class="empty-note">RT-SからRT-Rへ到達できる経路がありません。</p>';
+    }
   }
 
   function fixedRenderRoutingTable() {
@@ -864,6 +962,26 @@
         </table>`;
       wrap.appendChild(box);
     });
+
+    if (Fixed.meshEnabled) {
+      const meshBox = el('div', 'rt-router');
+      let meshRows = '';
+      MESH_LINK_DEFS.forEach((md) => {
+        const link = Fixed.topo.links.find((l) => l.id === md.id);
+        if (!link) return;
+        meshRows += `<tr>
+          <td>${md.label}</td>
+          <td><input type="number" min="1" max="99" value="${link.cost}" data-link-id="${link.id}" class="rt-cost-input" ${manual ? '' : 'disabled'}></td>
+          <td><button class="btn btn-mini rt-toggle" data-link-id="${link.id}">${link.down ? '<span class="rt-down">DOWN</span>' : 'UP'}</button></td>
+        </tr>`;
+      });
+      meshBox.innerHTML = `<div class="rt-router-name">メッシュ接続</div>
+        <table class="rt-tbl">
+          <tr><th>区間</th><th>メトリック</th><th>状態</th></tr>
+          ${meshRows}
+        </table>`;
+      wrap.appendChild(meshBox);
+    }
 
     wrap.querySelectorAll('.rt-cost-input').forEach((inp) => {
       inp.addEventListener('change', () => {
@@ -1012,19 +1130,8 @@
   }
 
   function renderRouteCompareWithChoice(result, statusEl) {
-    const wrap = document.getElementById('route-compare');
-    const costs = getRouteCosts(Fixed.topo);
-    wrap.innerHTML = '';
-    costs.forEach((c) => {
-      const row = el('div', 'route-row');
-      const isChosen = result.reachable && result.path.includes(c.mid);
-      if (c.down) row.classList.add('is-unavailable');
-      if (isChosen) row.classList.add('is-chosen');
-      row.innerHTML = `<span class="route-tag">${c.key}</span>
-        <span>RT-S → ${c.mid.toUpperCase()} → RT-R</span>
-        <span class="route-cost">${c.down ? '不通' : 'コスト ' + c.cost}</span>`;
-      wrap.appendChild(row);
-    });
+    Fixed.lastChosenPath = result.reachable ? result.path : null;
+    fixedRenderRouteCompare(Fixed.lastChosenPath);
 
     if (result.reachable) {
       const flow = startFlow(Fixed, Fixed.topo, result.path, fixedRender, fixedLog);
@@ -1057,6 +1164,15 @@
       }
       const linkTarget = e.target.closest('[data-link-id]');
       if (linkTarget) { fixedOpenLinkModal(linkTarget.dataset.linkId); return; }
+    });
+    // 右クリックでも常にルーティングテーブルを確認できるようにする（左クリックの挙動は変更しない）
+    Fixed.svg.addEventListener('contextmenu', (e) => {
+      const nodeTarget = e.target.closest('[data-node-id]');
+      if (!nodeTarget) return;
+      const node = Fixed.topo.nodes.get(nodeTarget.dataset.nodeId);
+      if (!node || node.type !== 'router') return;
+      e.preventDefault();
+      openFixedRtPopover(node.id);
     });
     document.addEventListener('click', (e) => {
       if (!Fixed.openPopoverNodeId) return;
@@ -1140,6 +1256,18 @@
       fixedRender();
     });
 
+    document.getElementById('mesh-toggle').addEventListener('change', (e) => {
+      Fixed.meshEnabled = e.target.checked;
+      if (Fixed.meshEnabled) {
+        addMeshLinks(Fixed.topo);
+        fixedLog('sys', 'メッシュ接続（RT-A—RT-B, RT-B—RT-C）を有効にしました');
+      } else {
+        removeMeshLinks(Fixed.topo);
+        fixedLog('sys', 'メッシュ接続を無効にしました（RT-A—RT-B, RT-B—RT-Cは経路計算・表示から除外されます）');
+      }
+      fixedRender();
+    });
+
     fixedLog('sys', '準備完了。送信元・宛先PCを選び「パケットを送信」を押してください。');
   }
 
@@ -1202,7 +1330,9 @@
     driftTimer: null,
     failRate: 15,
     autoRecoverEnabled: false,
-    speedFactor: 1
+    speedFactor: 1,
+    undoStack: [],
+    redoStack: []
   };
 
   function freeLog(level, msg, delay) { makeLogger(Free.logEl, Free.logBadge)(level, msg, delay); }
@@ -1212,6 +1342,7 @@
   /* ---- IPアドレス／サブネット整合性チェック（自由配置） ---- */
 
   function freeBuildClusters(topo) {
+    // 現実のルーターと同じ挙動：どのリンクも、その両端は同じサブネットに属する必要がある
     const uf = createUnionFind();
     topo.nodes.forEach((n) => { if (n.type !== 'router') uf.find(n.id); });
     topo.links.forEach((l) => {
@@ -1219,15 +1350,7 @@
       if (!na || !nb) return;
       const keyA = na.type === 'router' ? `${na.id}::${l.id}` : na.id;
       const keyB = nb.type === 'router' ? `${nb.id}::${l.id}` : nb.id;
-      if (na.type !== 'router' && nb.type !== 'router') {
-        uf.union(keyA, keyB);
-      } else if (na.type === 'router' && nb.type !== 'router') {
-        if (nb.type === 'switch') uf.union(keyA, keyB); else uf.find(keyA);
-      } else if (nb.type === 'router' && na.type !== 'router') {
-        if (na.type === 'switch') uf.union(keyB, keyA); else uf.find(keyB);
-      } else {
-        uf.find(keyA); uf.find(keyB);
-      }
+      uf.union(keyA, keyB);
     });
     return uf;
   }
@@ -1336,23 +1459,6 @@
         const nk = networkKey(r.entry.ip, parseMaskToPrefix(r.entry.mask));
         if (nk !== majorityNet) freeMarkError(errorMap, r.entry, 'subnet');
       });
-    });
-
-    // 直結リンク（ルーター⇔ルーター／ルーター⇔PC）は異なるサブネットである必要がある
-    Free.topo.links.forEach((l) => {
-      const na = Free.topo.nodes.get(l.a), nb = Free.topo.nodes.get(l.b);
-      if (!na || !nb) return;
-      const bothRouters = na.type === 'router' && nb.type === 'router';
-      const routerToPc = (na.type === 'router' && nb.type === 'pc') || (nb.type === 'router' && na.type === 'pc');
-      if (!bothRouters && !routerToPc) return;
-      const keyA = na.type === 'router' ? `${na.id}::${l.id}` : na.id;
-      const keyB = nb.type === 'router' ? `${nb.id}::${l.id}` : nb.id;
-      const ea = freeResolveEntry(Free.topo, keyA), eb = freeResolveEntry(Free.topo, keyB);
-      if (!ea || !eb) return;
-      if (!isValidIpFormat(ea.ip) || !isValidMaskFormat(ea.mask) || !isValidIpFormat(eb.ip) || !isValidMaskFormat(eb.mask)) return;
-      const na1 = networkKey(ea.ip, parseMaskToPrefix(ea.mask));
-      const nb1 = networkKey(eb.ip, parseMaskToPrefix(eb.mask));
-      if (na1 === nb1) { freeMarkError(errorMap, ea, 'subnet'); freeMarkError(errorMap, eb, 'subnet'); }
     });
 
     Free.nodeErrors = errorMap;
@@ -1467,6 +1573,7 @@
     pop.innerHTML = `<div class="ip-popover-title"><span>${node.name} の設定</span><button type="button" class="ip-popover-close" id="ip-popover-close">×</button></div>${body}`;
 
     pop.querySelectorAll('.ip-field, .mask-input').forEach((input) => {
+      input.addEventListener('focus', () => { freePushUndo(); });
       input.addEventListener('input', () => {
         const key = input.dataset.key, field = input.dataset.field;
         if (node.type === 'pc') {
@@ -1516,7 +1623,69 @@
     document.getElementById('ip-popover').classList.add('is-hidden');
   }
 
+  /* ---- 元に戻す／やり直す（Undo/Redo） ---- */
+
+  function freeSnapshot() {
+    return {
+      nodes: Array.from(Free.topo.nodes.entries()).map(([id, n]) => [id, JSON.parse(JSON.stringify(n))]),
+      links: Free.topo.links.map((l) => {
+        const copy = Object.assign({}, l);
+        delete copy._recoveryTimer;
+        return JSON.parse(JSON.stringify(copy));
+      }),
+      typeCounters: Object.assign({}, Free.typeCounters),
+      ifaceCounter: Free.ifaceCounter
+    };
+  }
+
+  function freeRestoreSnapshot(snap) {
+    Free.topo.links.forEach((l) => { if (l._recoveryTimer) { clearTimeout(l._recoveryTimer); l._recoveryTimer = null; } });
+    Free.topo.nodes = new Map(snap.nodes.map(([id, n]) => [id, JSON.parse(JSON.stringify(n))]));
+    Free.topo.links = snap.links.map((l) => JSON.parse(JSON.stringify(l)));
+    Free.typeCounters = Object.assign({}, snap.typeCounters);
+    Free.ifaceCounter = snap.ifaceCounter;
+    if (Free.openPopoverNodeId && !Free.topo.nodes.has(Free.openPopoverNodeId)) closeIpPopover();
+    freeRevalidateAndRender();
+    freePopulateSelects();
+  }
+
+  // ノード／リンク／IP設定／コストなどの「実質的な変更」の直前に呼ぶ
+  function freePushUndo() {
+    Free.undoStack.push(freeSnapshot());
+    if (Free.undoStack.length > 50) Free.undoStack.shift();
+    Free.redoStack = [];
+    freeUpdateUndoRedoButtons();
+  }
+
+  function freeUndo() {
+    if (!Free.undoStack.length) return;
+    const cur = freeSnapshot();
+    const prev = Free.undoStack.pop();
+    Free.redoStack.push(cur);
+    freeRestoreSnapshot(prev);
+    freeLog('sys', '元に戻しました');
+    freeUpdateUndoRedoButtons();
+  }
+
+  function freeRedo() {
+    if (!Free.redoStack.length) return;
+    const cur = freeSnapshot();
+    const next = Free.redoStack.pop();
+    Free.undoStack.push(cur);
+    freeRestoreSnapshot(next);
+    freeLog('sys', 'やり直しました');
+    freeUpdateUndoRedoButtons();
+  }
+
+  function freeUpdateUndoRedoButtons() {
+    const undoBtn = document.getElementById('free-undo');
+    const redoBtn = document.getElementById('free-redo');
+    if (undoBtn) undoBtn.disabled = Free.undoStack.length === 0;
+    if (redoBtn) redoBtn.disabled = Free.redoStack.length === 0;
+  }
+
   function freeAddNode(type) {
+    freePushUndo();
     Free.typeCounters[type] += 1;
     const n = Free.typeCounters[type];
     const id = uid('f' + type);
@@ -1590,9 +1759,47 @@
     });
     const hint = document.getElementById('free-hint');
     if (mode === 'move') hint.textContent = 'ノードをドラッグして移動できます。PC／ルーターをクリックするとIP設定を編集できます。';
-    if (mode === 'link') hint.textContent = '「接続」モードで2つのノードを順にクリックするとリンクを作成します（ルーターは最大2本まで）。';
+    if (mode === 'link') hint.textContent = '「接続」モードで2つのノードを順にクリックするとリンクを作成します（ルーターは最大4本まで）。';
     if (mode === 'delete') hint.textContent = '「削除」モードでノードまたはリンクをクリックすると削除します。';
     freeRender();
+  }
+
+  function freeFindSegmentPcFor(switchId) {
+    const links = Free.topo.links.filter((l) => l.a === switchId || l.b === switchId);
+    for (const l of links) {
+      const otherId = l.a === switchId ? l.b : l.a;
+      const n = Free.topo.nodes.get(otherId);
+      if (n && n.type === 'pc' && isValidIpFormat(n.ip) && isValidMaskFormat(n.mask)) return n;
+    }
+    return null;
+  }
+
+  function freeHostIpNear(refIp, refMask) {
+    const prefix = parseMaskToPrefix(refMask);
+    const ipInt = parseIp(refIp);
+    const maskBits = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+    const netInt = (ipInt & maskBits) >>> 0;
+    const lastOctet = ipInt & 0xFF;
+    const hostInt = (netInt + (lastOctet === 250 ? 251 : 250)) >>> 0;
+    return intToIp(hostInt);
+  }
+
+  // 新規ルーターインタフェースの初期IPを、接続先に合わせて自動設定する
+  // （現実のルーターと同様、直結でも同じサブネットが必要なため）
+  function freeAssignDefaultIface(routerNode, linkId, otherNode) {
+    if (otherNode.type === 'pc' && isValidIpFormat(otherNode.ip) && isValidMaskFormat(otherNode.mask)) {
+      routerNode.ifaces[linkId] = { ip: freeHostIpNear(otherNode.ip, otherNode.mask), mask: otherNode.mask };
+      return;
+    }
+    if (otherNode.type === 'switch') {
+      const match = freeFindSegmentPcFor(otherNode.id);
+      if (match) {
+        routerNode.ifaces[linkId] = { ip: freeHostIpNear(match.ip, match.mask), mask: match.mask };
+        return;
+      }
+    }
+    Free.ifaceCounter += 1;
+    routerNode.ifaces[linkId] = { ip: `10.90.${Free.ifaceCounter}.1`, mask: '/24' };
   }
 
   function freeLinkCountForNode(nodeId) {
@@ -1615,6 +1822,7 @@
       return;
     }
     if (Free.interactionMode === 'delete') {
+      freePushUndo();
       const linksToRemove = Free.topo.links.filter((l) => l.a === nodeId || l.b === nodeId);
       linksToRemove.forEach(freeRemoveLinkIfaces);
       Free.topo.links = Free.topo.links.filter((l) => l.a !== nodeId && l.b !== nodeId);
@@ -1641,9 +1849,9 @@
         return;
       }
       const nodeA = Free.topo.nodes.get(a), nodeB = Free.topo.nodes.get(b);
-      if ((nodeA.type === 'router' && freeLinkCountForNode(a) >= 2) ||
-          (nodeB.type === 'router' && freeLinkCountForNode(b) >= 2)) {
-        freeLog('fail', 'ルーターは最大2本までしか接続できません（接続を中止しました）');
+      if ((nodeA.type === 'router' && freeLinkCountForNode(a) >= 4) ||
+          (nodeB.type === 'router' && freeLinkCountForNode(b) >= 4)) {
+        freeLog('fail', 'ルーターは最大4本までしか接続できません（接続を中止しました）');
         freeRender();
         return;
       }
@@ -1655,15 +1863,20 @@
         costEditable: routable,
         initialDown: false,
         onSave: (cost, down) => {
+          freePushUndo();
           const id = uid('fl');
           const link = { id, a, b, cost: routable ? cost : 0, down, routable };
           Free.topo.links.push(link);
-          [nodeA, nodeB].forEach((node) => {
-            if (node.type === 'router') {
-              Free.ifaceCounter += 1;
-              node.ifaces[id] = { ip: `10.90.${Free.ifaceCounter}.1`, mask: '/30' };
-            }
-          });
+          if (nodeA.type === 'router' && nodeB.type === 'router') {
+            // ルーター同士は新しい共通サブネットを生成し、両端を同じサブネットにする
+            Free.ifaceCounter += 1;
+            const net = `10.91.${Free.ifaceCounter}`;
+            nodeA.ifaces[id] = { ip: `${net}.1`, mask: '/30' };
+            nodeB.ifaces[id] = { ip: `${net}.2`, mask: '/30' };
+          } else {
+            if (nodeA.type === 'router') freeAssignDefaultIface(nodeA, id, nodeB);
+            if (nodeB.type === 'router') freeAssignDefaultIface(nodeB, id, nodeA);
+          }
           if (down && Free.autoRecoverEnabled) scheduleAutoRecover(Free, Free.topo, link, freeLog, freeRender);
           freeLog('sys', `${nodeA.name} — ${nodeB.name} を接続しました`);
           freeRevalidateAndRender();
@@ -1676,6 +1889,7 @@
     const link = Free.topo.links.find((l) => l.id === linkId);
     if (!link) return;
     if (Free.interactionMode === 'delete') {
+      freePushUndo();
       freeRemoveLinkIfaces(link);
       Free.topo.links = Free.topo.links.filter((l) => l.id !== linkId);
       freeLog('sys', 'リンクを削除しました');
@@ -1690,6 +1904,7 @@
       costEditable: link.routable,
       initialDown: link.down,
       onSave: (cost, down) => {
+        freePushUndo();
         if (link.routable) link.cost = cost;
         setLinkDownState(Free, Free.topo, link, down, freeLog, freeRender);
         freeLog('sys', `${nodeA.name} — ${nodeB.name} を更新しました`);
@@ -1751,6 +1966,7 @@
       btn.addEventListener('click', () => freeSetMode(btn.dataset.mode));
     });
     document.getElementById('free-clear').addEventListener('click', () => {
+      freePushUndo();
       Free.topo.nodes.clear();
       Free.topo.links = [];
       Free.typeCounters = { pc: 0, switch: 0, router: 0 };
@@ -1763,6 +1979,15 @@
       freeLog('sys', 'すべて消去しました');
     });
     document.getElementById('free-send-btn').addEventListener('click', freeSend);
+    document.getElementById('free-undo').addEventListener('click', freeUndo);
+    document.getElementById('free-redo').addEventListener('click', freeRedo);
+    document.addEventListener('keydown', (e) => {
+      const panelFreeEl = document.getElementById('panel-free');
+      if (!panelFreeEl || panelFreeEl.hidden) return; // 自由配置タブが表示されているときのみ有効
+      const key = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && key === 'z') { e.preventDefault(); freeUndo(); }
+      else if ((e.ctrlKey || e.metaKey) && key === 'y') { e.preventDefault(); freeRedo(); }
+    });
     document.getElementById('free-clear-log').addEventListener('click', () => {
       Free.logEl.innerHTML = '';
       Free.logBadge.hidden = true;
@@ -1817,6 +2042,16 @@
       if (nodeTarget) { freeHandleNodeClick(nodeTarget.dataset.nodeId); return; }
       const linkTarget = e.target.closest('[data-link-id]');
       if (linkTarget) { freeHandleLinkClick(linkTarget.dataset.linkId); return; }
+    });
+
+    // 右クリックはモードに関係なく常に設定を確認できる（進行中の接続選択などは維持したまま）
+    Free.svg.addEventListener('contextmenu', (e) => {
+      const nodeTarget = e.target.closest('[data-node-id]');
+      if (!nodeTarget) return;
+      const node = Free.topo.nodes.get(nodeTarget.dataset.nodeId);
+      if (!node || node.type === 'switch') return;
+      e.preventDefault();
+      openIpPopover(node.id);
     });
 
     document.addEventListener('click', (e) => {

@@ -237,6 +237,11 @@ input[type="range"]{
   font-size: 14px;
 }
 .btn-primary:hover{ color: #06201c; filter: brightness(1.08); }
+.btn:disabled{
+  opacity: .4;
+  cursor: not-allowed;
+}
+.btn:disabled:hover{ border-color: var(--border-soft); color: var(--text); }
 .btn-primary:disabled{
   background: var(--panel-raised);
   border-color: var(--border-soft);
@@ -391,6 +396,11 @@ input[type="range"]{
   cursor: pointer;
 }
 .link-line.is-routable:hover{ stroke: var(--accent); }
+.link-line.is-mesh{
+  stroke: #4a6a5a;
+  stroke-dasharray: 3 3;
+}
+.link-line.is-mesh:hover{ stroke: var(--ok); }
 .link-line.is-down{
   stroke: var(--danger);
   stroke-dasharray: 6 5;
@@ -406,11 +416,12 @@ input[type="range"]{
 }
 .link-cost{
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 13px;
+  font-weight: 600;
   fill: var(--text-dim);
 }
 .link-cost-bg{ fill: var(--panel); }
-.link-cost.is-down{ fill: var(--danger); }
+.link-cost.is-down{ fill: var(--danger); font-size: 15px; font-weight: 700; }
 
 .pkt-dot{
   fill: var(--signal);

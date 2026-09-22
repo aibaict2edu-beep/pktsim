@@ -69,6 +69,12 @@
           <input type="range" id="flow-speed" min="0.5" max="3" step="0.1" value="1">
           <output id="flow-speed-out" class="field-value">1.0x</output>
         </div>
+        <div class="toolbar-group">
+          <label class="check-label" for="mesh-toggle">
+            <input type="checkbox" id="mesh-toggle">
+            メッシュ接続を有効にする（RT-A—RT-B, RT-B—RT-C）
+          </label>
+        </div>
         <button class="btn btn-ghost" id="reset-links">全リンク復旧</button>
       </div>
 
@@ -160,6 +166,8 @@
           <input type="range" id="free-flow-speed" min="0.5" max="3" step="0.1" value="1">
           <output id="free-flow-speed-out" class="field-value">1.0x</output>
         </div>
+        <button class="btn btn-ghost" id="free-undo" disabled>↺ 元に戻す</button>
+        <button class="btn btn-ghost" id="free-redo" disabled>↻ やり直す</button>
         <button class="btn btn-ghost" id="free-clear">全消去</button>
       </div>
 
