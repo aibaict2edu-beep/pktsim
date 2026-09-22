@@ -49,12 +49,22 @@
           <input type="range" id="fail-rate" min="0" max="60" step="5" value="15">
           <output id="fail-rate-out" class="field-value">15%</output>
         </div>
+        <div class="toolbar-group">
+          <label class="check-label" for="drift-toggle">
+            <input type="checkbox" id="drift-toggle">
+            時間経過でコスト自動変動
+          </label>
+          <label class="field-label" for="drift-fail-rate">ダウン確率</label>
+          <input type="number" id="drift-fail-rate" class="mini-number" min="0" max="100" value="5">
+          <span class="field-value">%</span>
+        </div>
         <button class="btn btn-ghost" id="reset-links">全リンク復旧</button>
       </div>
 
       <div class="stage-canvas-wrap">
         <svg id="topo-svg" class="topo-svg" viewBox="0 0 1120 560" preserveAspectRatio="xMidYMid meet" aria-label="ネットワーク構成図"></svg>
-        <p class="stage-hint">リンクをクリックしてコスト編集／障害トグル。ノードにカーソルを合わせるとIP・MACを表示。</p>
+        <p class="stage-hint">ルーターをクリックするとルーティングテーブルを表示。リンクをクリックしてコスト編集／障害トグル。</p>
+        <div class="ip-popover is-hidden" id="fixed-rt-popover"></div>
       </div>
     </section>
 
@@ -113,6 +123,15 @@
           <button class="btn btn-tool is-active" data-mode="move" id="mode-move">移動</button>
           <button class="btn btn-tool" data-mode="link" id="mode-link">接続</button>
           <button class="btn btn-tool" data-mode="delete" id="mode-delete">削除</button>
+        </div>
+        <div class="toolbar-group">
+          <label class="check-label" for="free-drift-toggle">
+            <input type="checkbox" id="free-drift-toggle">
+            時間経過でコスト自動変動
+          </label>
+          <label class="field-label" for="free-drift-fail-rate">ダウン確率</label>
+          <input type="number" id="free-drift-fail-rate" class="mini-number" min="0" max="100" value="5">
+          <span class="field-value">%</span>
         </div>
         <button class="btn btn-ghost" id="free-clear">全消去</button>
       </div>

@@ -91,6 +91,20 @@
     return ((ipInt & maskBits) >>> 0) + '/' + prefix;
   }
 
+  function intToIp(n) {
+    const u = n >>> 0;
+    return [(u >>> 24) & 255, (u >>> 16) & 255, (u >>> 8) & 255, u & 255].join('.');
+  }
+
+  function networkLabelFor(ip, mask) {
+    const ipInt = parseIp(ip);
+    const prefix = parseMaskToPrefix(mask);
+    if (ipInt === null || prefix === null) return null;
+    const maskBits = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+    const netInt = (ipInt & maskBits) >>> 0;
+    return `${intToIp(netInt)}/${prefix}`;
+  }
+
   /* ------------------------------------------------------------------ *
    * 0c. 単純Union-Find（自由配置のサブネット判定に使用）
    * ------------------------------------------------------------------ */
@@ -180,6 +194,46 @@
       if (n && n.type === 'router') return n;
     }
     return topology.nodes.get(path[path.length - 1]);
+  }
+
+  // ルーターごとのルーティングテーブルを算出（宛先ネットワーク・ネクストホップ・メトリック）
+  function computeRoutingTable(topology, routerId, segments) {
+    const linkCount = topology.links.filter((l) => l.a === routerId || l.b === routerId).length;
+    if (linkCount === 0) return { rows: [], emptyNote: '経路情報なし（リンクが接続されていません）' };
+
+    let rows = [];
+    segments.forEach((seg) => {
+      if (seg.repId === routerId) return;
+      const result = dijkstra(topology, routerId, seg.repId);
+      if (!result.reachable) {
+        rows.push({ network: seg.label, nextHop: '—', metric: '不通', type: 'unreachable' });
+        return;
+      }
+      const hasOtherRouter = result.path.slice(1, -1).some((id) => {
+        const n = topology.nodes.get(id);
+        return n && n.type === 'router';
+      });
+      if (!hasOtherRouter) {
+        rows.push({ network: seg.label, nextHop: '直結', metric: 0, type: 'connected' });
+      } else {
+        const nextHopNode = topology.nodes.get(result.path[1]);
+        rows.push({ network: seg.label, nextHop: nextHopNode.name, metric: result.cost, type: 'remote' });
+      }
+    });
+
+    if (linkCount === 1) {
+      // リンクが1本のみ ＝ 直結ネットワークの情報しか持たない（他ルーターから経路を学習できない）
+      rows = rows.filter((r) => r.type === 'connected');
+      if (rows.length === 0) return { rows: [], emptyNote: '直結ネットワークの情報のみ（他ネットワークへの経路は未学習）' };
+    }
+    return { rows, emptyNote: rows.length === 0 ? '経路情報なし' : null };
+  }
+
+  function fixedNetworkSegments() {
+    return [
+      { label: '192.168.1.0/24（送信側PC）', repId: 'pc-s1' },
+      { label: '192.168.2.0/24（受信側PC）', repId: 'pc-r1' }
+    ];
   }
 
   /* ------------------------------------------------------------------ *
@@ -417,6 +471,46 @@
     setTimeout(() => { flow.state = 'done'; rerender(); }, dur * 1000);
   }
 
+  /* ---- 時間経過によるコスト自動変動／自動障害（共通） ---- */
+
+  const DRIFT_INTERVAL_MS = 3000;
+  const DRIFT_DELTAS = [-2, -1, 1, 2];
+
+  function driftTick(topology, store, logFn) {
+    const routableLinks = topology.links.filter((l) => l.routable);
+    routableLinks.forEach((link) => {
+      if (link.down) return; // ダウン中はコスト変動を一時停止
+      const failRoll = Math.random() * 100;
+      if (failRoll < store.driftFailRate) {
+        link.down = true;
+        const na = topology.nodes.get(link.a), nb = topology.nodes.get(link.b);
+        const label = `${na ? na.name : link.a} — ${nb ? nb.name : link.b}`;
+        logFn('fail', `【時間経過】${label} でリンク障害が発生しました（手動で復旧してください）`);
+        return;
+      }
+      const delta = DRIFT_DELTAS[Math.floor(Math.random() * DRIFT_DELTAS.length)];
+      const newCost = clamp(link.cost + delta, 1, 10);
+      if (newCost !== link.cost) {
+        link.cost = newCost;
+      }
+    });
+  }
+
+  function startDriftTimer(topology, store, logFn, rerender) {
+    stopDriftTimer(store);
+    store.driftTimer = setInterval(() => {
+      driftTick(topology, store, logFn);
+      rerender();
+    }, DRIFT_INTERVAL_MS);
+  }
+
+  function stopDriftTimer(store) {
+    if (store.driftTimer) {
+      clearInterval(store.driftTimer);
+      store.driftTimer = null;
+    }
+  }
+
   /* ------------------------------------------------------------------ *
    * 4. ログ出力
    * ------------------------------------------------------------------ */
@@ -517,7 +611,11 @@
     failRate: 15,
     hoverNodeId: null,
     flows: [],
-    colorIdx: 0
+    colorIdx: 0,
+    driftEnabled: false,
+    driftFailRate: 5,
+    driftTimer: null,
+    openPopoverNodeId: null
   };
 
   function fixedLog(level, msg, delay) {
@@ -528,6 +626,10 @@
     renderTopology(Fixed.svg, Fixed.topo, { hoverNodeId: Fixed.hoverNodeId, flows: Fixed.flows });
     fixedRenderRouteCompare();
     fixedRenderRoutingTable();
+    if (Fixed.openPopoverNodeId) {
+      const n = Fixed.topo.nodes.get(Fixed.openPopoverNodeId);
+      if (n) renderFixedRtPopoverContent(n); else closeFixedRtPopover();
+    }
   }
 
   function fixedRenderRouteCompare() {
@@ -642,6 +744,64 @@
     fixedRender();
   }
 
+  /* ---- ルーティングテーブル ポップオーバー（クリックしたルーターの経路情報） ---- */
+
+  function fixedRoutingTableHtml(router) {
+    const segments = fixedNetworkSegments();
+    const { rows, emptyNote } = computeRoutingTable(Fixed.topo, router.id, segments);
+    if (emptyNote && rows.length === 0) {
+      return `<p class="popover-note">${emptyNote}</p>`;
+    }
+    const body = rows.map((r) => `<tr>
+        <td>${r.network}</td>
+        <td>${r.nextHop}</td>
+        <td class="${r.type === 'unreachable' ? 'rt-down' : ''}">${r.metric}</td>
+      </tr>`).join('');
+    return `<table class="rt-tbl">
+      <tr><th>宛先ネットワーク</th><th>ネクストホップ</th><th>メトリック</th></tr>
+      ${body}
+    </table>`;
+  }
+
+  function renderFixedRtPopoverContent(node) {
+    const pop = document.getElementById('fixed-rt-popover');
+    pop.innerHTML = `<div class="ip-popover-title"><span>${node.name} のルーティングテーブル</span><button type="button" class="ip-popover-close" id="fixed-rt-popover-close">×</button></div>
+      ${fixedRoutingTableHtml(node)}`;
+    document.getElementById('fixed-rt-popover-close').addEventListener('click', closeFixedRtPopover);
+  }
+
+  function positionFixedRtPopover(node) {
+    const pop = document.getElementById('fixed-rt-popover');
+    const wrap = Fixed.svg.closest('.stage-canvas-wrap');
+    if (!node || !wrap) return;
+    const pt = Fixed.svg.createSVGPoint();
+    pt.x = node.x; pt.y = node.y;
+    const ctm = Fixed.svg.getScreenCTM();
+    if (!ctm) return;
+    const screenPt = pt.matrixTransform(ctm);
+    const wrapRect = wrap.getBoundingClientRect();
+    let left = screenPt.x - wrapRect.left + 36;
+    let top = screenPt.y - wrapRect.top - 20;
+    left = clamp(left, 8, wrapRect.width - 280);
+    top = clamp(top, 8, wrapRect.height - 20);
+    pop.style.left = left + 'px';
+    pop.style.top = top + 'px';
+  }
+
+  function openFixedRtPopover(nodeId) {
+    const node = Fixed.topo.nodes.get(nodeId);
+    if (!node) return;
+    Fixed.openPopoverNodeId = nodeId;
+    renderFixedRtPopoverContent(node);
+    positionFixedRtPopover(node);
+    document.getElementById('fixed-rt-popover').classList.remove('is-hidden');
+  }
+
+  function closeFixedRtPopover() {
+    Fixed.openPopoverNodeId = null;
+    document.getElementById('fixed-rt-popover').classList.add('is-hidden');
+  }
+
   function fixedSend() {
     const srcId = document.getElementById('src-pc').value;
     const dstId = document.getElementById('dst-pc').value;
@@ -701,8 +861,23 @@
     fixedRender();
 
     Fixed.svg.addEventListener('click', (e) => {
+      const nodeTarget = e.target.closest('[data-node-id]');
+      if (nodeTarget) {
+        const node = Fixed.topo.nodes.get(nodeTarget.dataset.nodeId);
+        if (node && node.type === 'router') {
+          if (Fixed.openPopoverNodeId === node.id) { closeFixedRtPopover(); } else { openFixedRtPopover(node.id); }
+        }
+        return;
+      }
       const linkTarget = e.target.closest('[data-link-id]');
       if (linkTarget) { fixedOpenLinkModal(linkTarget.dataset.linkId); return; }
+    });
+    document.addEventListener('click', (e) => {
+      if (!Fixed.openPopoverNodeId) return;
+      const popover = document.getElementById('fixed-rt-popover');
+      if (popover.contains(e.target)) return;
+      if (e.target.closest('[data-node-id]')) return;
+      closeFixedRtPopover();
     });
     Fixed.svg.addEventListener('mousemove', (e) => {
       const nodeTarget = e.target.closest('[data-node-id]');
@@ -743,6 +918,20 @@
       Fixed.flows = [];
       fixedLog('sys', 'すべてのリンクを復旧し、経路のハイライトをリセットしました');
       fixedRender();
+    });
+
+    document.getElementById('drift-toggle').addEventListener('change', (e) => {
+      Fixed.driftEnabled = e.target.checked;
+      if (Fixed.driftEnabled) {
+        startDriftTimer(Fixed.topo, Fixed, fixedLog, fixedRender);
+        fixedLog('sys', '時間経過によるコスト自動変動を有効にしました');
+      } else {
+        stopDriftTimer(Fixed);
+        fixedLog('sys', '時間経過によるコスト自動変動を停止しました');
+      }
+    });
+    document.getElementById('drift-fail-rate').addEventListener('input', (e) => {
+      Fixed.driftFailRate = clamp(parseInt(e.target.value, 10) || 0, 0, 100);
     });
 
     fixedLog('sys', '準備完了。送信元・宛先PCを選び「パケットを送信」を押してください。');
@@ -801,7 +990,10 @@
     colorIdx: 0,
     ifaceCounter: 0,
     openPopoverNodeId: null,
-    nodeErrors: new Map()
+    nodeErrors: new Map(),
+    driftEnabled: false,
+    driftFailRate: 5,
+    driftTimer: null
   };
 
   function freeLog(level, msg, delay) { makeLogger(Free.logEl, Free.logBadge)(level, msg, delay); }
@@ -829,6 +1021,29 @@
       }
     });
     return uf;
+  }
+
+  function freeNetworkSegments() {
+    const uf = freeBuildClusters(Free.topo);
+    const clusters = new Map();
+    uf.keys().forEach((key) => {
+      const root = uf.find(key);
+      if (!clusters.has(root)) clusters.set(root, []);
+      clusters.get(root).push(key);
+    });
+    const segments = [];
+    clusters.forEach((keys) => {
+      for (const k of keys) {
+        if (k.includes('::')) continue; // ルーターI/Fは代表にしない（PCを優先）
+        const n = Free.topo.nodes.get(k);
+        if (n && n.type === 'pc' && isValidIpFormat(n.ip) && isValidMaskFormat(n.mask)) {
+          const label = networkLabelFor(n.ip, n.mask);
+          if (label) segments.push({ label, repId: k });
+          break;
+        }
+      }
+    });
+    return segments;
   }
 
   function freeResolveEntry(topo, key) {
@@ -953,7 +1168,6 @@
     freeValidate();
     freeRender();
     freeUpdateSendButtonState();
-    if (Free.openPopoverNodeId) renderIpPopoverContent(Free.topo.nodes.get(Free.openPopoverNodeId));
   }
 
   /* ---- IP編集ポップオーバー ---- */
@@ -974,7 +1188,7 @@
     const wrapRect = wrap.getBoundingClientRect();
     let left = screenPt.x - wrapRect.left + 36;
     let top = screenPt.y - wrapRect.top - 20;
-    left = clamp(left, 8, wrapRect.width - 240);
+    left = clamp(left, 8, wrapRect.width - 280);
     top = clamp(top, 8, wrapRect.height - 20);
     pop.style.left = left + 'px';
     pop.style.top = top + 'px';
@@ -1007,13 +1221,13 @@
 
     let body = '';
     if (node.type === 'pc') {
-      body = ifaceBlockHtml('IPアドレス／マスク', node.ip, node.mask, errRec.self, 'self');
+      body = `<div class="popover-section-title">IPアドレス設定</div>` + ifaceBlockHtml('IPアドレス／マスク', node.ip, node.mask, errRec.self, 'self');
     } else if (node.type === 'router') {
       const linkIds = Object.keys(node.ifaces || {});
       if (linkIds.length === 0) {
-        body = '<p class="iface-empty">まだリンクが接続されていません。</p>';
+        body = '<div class="popover-section-title">IPアドレス設定</div><p class="iface-empty">まだリンクが接続されていません。</p>';
       } else {
-        body = linkIds.map((linkId) => {
+        body = '<div class="popover-section-title">IPアドレス設定</div>' + linkIds.map((linkId) => {
           const link = Free.topo.links.find((l) => l.id === linkId);
           const otherId = link ? (link.a === node.id ? link.b : link.a) : null;
           const other = otherId ? Free.topo.nodes.get(otherId) : null;
@@ -1022,6 +1236,23 @@
           return ifaceBlockHtml(label, iface.ip, iface.mask, errRec.ifaces[linkId], linkId);
         }).join('');
       }
+      const segments = freeNetworkSegments();
+      const { rows, emptyNote } = computeRoutingTable(Free.topo, node.id, segments);
+      let rtHtml;
+      if (emptyNote && rows.length === 0) {
+        rtHtml = `<p class="popover-note">${emptyNote}</p>`;
+      } else {
+        const trs = rows.map((r) => `<tr>
+            <td>${r.network}</td>
+            <td>${r.nextHop}</td>
+            <td class="${r.type === 'unreachable' ? 'rt-down' : ''}">${r.metric}</td>
+          </tr>`).join('');
+        rtHtml = `<table class="rt-tbl">
+          <tr><th>宛先ネットワーク</th><th>ネクストホップ</th><th>メトリック</th></tr>
+          ${trs}
+        </table>`;
+      }
+      body += `<div class="popover-section-title">ルーティングテーブル</div>${rtHtml}`;
     }
 
     pop.innerHTML = `<div class="ip-popover-title"><span>${node.name} の設定</span><button type="button" class="ip-popover-close" id="ip-popover-close">×</button></div>${body}`;
@@ -1036,7 +1267,7 @@
           if (field === 'ip') node.ifaces[key].ip = input.value; else node.ifaces[key].mask = input.value;
         }
         freeValidate();
-        freeRender();
+        freeRenderSvg();
         freeUpdateSendButtonState();
         refreshIpPopoverFieldStyles(node);
       });
@@ -1100,7 +1331,7 @@
     freeLog('sys', `${name} を追加しました`);
   }
 
-  function freeRender() {
+  function freeRenderSvg() {
     renderTopology(Free.svg, Free.topo, {
       freeMode: true,
       hoverNodeId: Free.hoverNodeId,
@@ -1108,6 +1339,14 @@
       flows: Free.flows,
       errorNodeIds: new Set(Array.from(Free.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
     });
+  }
+
+  function freeRender() {
+    freeRenderSvg();
+    if (Free.openPopoverNodeId) {
+      const n = Free.topo.nodes.get(Free.openPopoverNodeId);
+      if (n) renderIpPopoverContent(n); else closeIpPopover();
+    }
   }
 
   function freePopulateSelects() {
@@ -1305,6 +1544,20 @@
       Free.logEl.innerHTML = '';
       Free.logBadge.hidden = true;
       Free.logBadge.textContent = '0';
+    });
+
+    document.getElementById('free-drift-toggle').addEventListener('change', (e) => {
+      Free.driftEnabled = e.target.checked;
+      if (Free.driftEnabled) {
+        startDriftTimer(Free.topo, Free, freeLog, freeRender);
+        freeLog('sys', '時間経過によるコスト自動変動を有効にしました');
+      } else {
+        stopDriftTimer(Free);
+        freeLog('sys', '時間経過によるコスト自動変動を停止しました');
+      }
+    });
+    document.getElementById('free-drift-fail-rate').addEventListener('input', (e) => {
+      Free.driftFailRate = clamp(parseInt(e.target.value, 10) || 0, 0, 100);
     });
 
     // クリック（ノード／リンク）
