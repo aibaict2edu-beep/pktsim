@@ -398,7 +398,7 @@
     });
 
     // 送信中／送信済みの経路を表すフロー（流れるライン）オーバーレイ
-    html += renderFlowOverlay(topology, state.flows);
+    html += renderFlowOverlay(topology, state.flows, state.speedFactor);
 
     // nodes
     topology.nodes.forEach((n) => {
@@ -421,10 +421,13 @@
       </g>`;
     });
 
+    // 転送中パケットのアイコン（フローラインの一番上に表示）
+    html += renderPacketIcons(topology, state.flows);
+
     svgEl.innerHTML = html;
   }
 
-  function renderFlowOverlay(topology, flows) {
+  function renderFlowOverlay(topology, flows, speedFactor) {
     if (!flows || !flows.length) return '';
     const groups = new Map();
     flows.forEach((flow) => {
@@ -437,6 +440,7 @@
         groups.get(key).push({ flow, a, b });
       }
     });
+    const dashDur = (FLOW_DASH_BASE_SEC / (speedFactor || 1)).toFixed(2);
     let html = '';
     groups.forEach((entries) => {
       const n = entries.length;
@@ -449,9 +453,40 @@
         const pts = shortenedEndpoints(e.a.x, e.a.y, e.b.x, e.b.y, pad);
         const x1 = pts.x1 + px * offset, y1 = pts.y1 + py * offset;
         const x2 = pts.x2 + px * offset, y2 = pts.y2 + py * offset;
-        const cls = 'flow-line ' + (e.flow.state === 'flowing' ? 'is-flowing' : 'is-done');
-        html += `<line class="${cls}" stroke="${e.flow.color}" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}"></line>`;
+        const state = e.flow.state;
+        const cls = 'flow-line ' + (state === 'flowing' ? 'is-flowing' : (state === 'failed' ? 'is-failed' : 'is-done'));
+        const style = state === 'flowing' ? ` style="animation-duration:${dashDur}s"` : '';
+        html += `<line class="${cls}" stroke="${e.flow.color}"${style} x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}"></line>`;
       });
+    });
+    return html;
+  }
+
+  function packetIconMarkup(color, motionPath, dur, staticX, staticY) {
+    const envelope = `<rect x="-8" y="-6" width="16" height="12" rx="2" fill="${color}" stroke="#0b1119" stroke-width="1"></rect>` +
+      `<path d="M -8,-6 L 0,1 L 8,-6" fill="none" stroke="#0b1119" stroke-width="1"></path>`;
+    if (motionPath) {
+      return `<g class="pkt-icon">${envelope}<animateMotion dur="${dur}s" path="${motionPath}" fill="freeze" repeatCount="1"></animateMotion></g>`;
+    }
+    return `<g class="pkt-icon" transform="translate(${staticX},${staticY})">${envelope}</g>`;
+  }
+
+  function renderPacketIcons(topology, flows) {
+    if (!flows || !flows.length) return '';
+    let html = '';
+    flows.forEach((flow) => {
+      if (flow.state === 'flowing' && flow.segmentFrom && flow.segmentTo) {
+        const a = topology.nodes.get(flow.segmentFrom), b = topology.nodes.get(flow.segmentTo);
+        if (!a || !b) return;
+        const p = flow.segmentProgressAtRestart || 0;
+        const sx = a.x + (b.x - a.x) * p, sy = a.y + (b.y - a.y) * p;
+        const dur = Math.max(0.05, flow.segmentDurationMs / 1000);
+        html += packetIconMarkup(flow.color, `M ${sx.toFixed(1)} ${sy.toFixed(1)} L ${b.x} ${b.y}`, dur.toFixed(2));
+      } else if (flow.state === 'done' && !flow.iconGone) {
+        const endId = flow.path[flow.path.length - 1];
+        const n = topology.nodes.get(endId);
+        if (n) html += packetIconMarkup(flow.color, null, null, n.x, n.y);
+      }
     });
     return html;
   }
@@ -462,30 +497,166 @@
     return c;
   }
 
-  function startFlow(store, topology, path, rerender) {
-    if (!path || path.length < 2) return;
-    const dur = Math.max(0.9, (path.length - 1) * 0.7);
-    const flow = { id: uid('flow'), path: path.slice(), color: nextFlowColor(store), state: 'flowing', dur };
+  /* ---- 送信フロー・エンジン（リアルタイム経路再評価つき） ---- */
+
+  const HOP_BASE_MS = 700;
+  const MAX_REROUTES = 5;
+  const FLOW_DASH_BASE_SEC = 0.55;
+
+  function startFlow(store, topology, path, rerender, logFn) {
+    if (!path || path.length < 2) return null;
+    const flow = {
+      id: uid('flow'),
+      color: nextFlowColor(store),
+      dstId: path[path.length - 1],
+      path: path.slice(),
+      currentIndex: 0,
+      state: 'flowing',
+      rerouteCount: 0,
+      segmentFrom: null,
+      segmentTo: null,
+      segmentStartedAt: null,
+      segmentDurationMs: null,
+      segmentProgressAtRestart: 0,
+      segmentTimer: null,
+      doneAt: null,
+      iconGone: false,
+      store,
+      topology,
+      rerender,
+      logFn
+    };
     store.flows.push(flow);
-    rerender();
-    setTimeout(() => { flow.state = 'done'; rerender(); }, dur * 1000);
+    advanceFlowSegment(flow);
+    return flow;
+  }
+
+  function advanceFlowSegment(flow) {
+    if (flow.state !== 'flowing') return;
+    const fromId = flow.path[flow.currentIndex];
+    const toId = flow.path[flow.currentIndex + 1];
+    const link = findLinkBetween(flow.topology, fromId, toId);
+    if (link && link.down) { rerouteFlow(flow, fromId); return; }
+    const hopMs = HOP_BASE_MS / (flow.store.speedFactor || 1);
+    flow.segmentFrom = fromId;
+    flow.segmentTo = toId;
+    flow.segmentStartedAt = Date.now();
+    flow.segmentDurationMs = hopMs;
+    flow.segmentProgressAtRestart = 0;
+    clearTimeout(flow.segmentTimer);
+    flow.segmentTimer = setTimeout(() => onSegmentComplete(flow), hopMs);
+    flow.rerender();
+  }
+
+  function onSegmentComplete(flow) {
+    if (flow.state !== 'flowing') return;
+    flow.currentIndex++;
+    if (flow.currentIndex >= flow.path.length - 1) {
+      flow.state = 'done';
+      flow.doneAt = Date.now();
+      flow.rerender();
+      if (flow.onResolved) flow.onResolved('done');
+      setTimeout(() => { flow.iconGone = true; flow.rerender(); }, 600);
+      return;
+    }
+    advanceFlowSegment(flow);
+  }
+
+  function rerouteFlow(flow, fromId) {
+    const topology = flow.topology;
+    const fromNode = topology.nodes.get(fromId);
+    flow.rerouteCount++;
+    if (flow.rerouteCount > MAX_REROUTES) {
+      flow.state = 'failed';
+      flow.doneAt = Date.now();
+      if (flow.logFn) flow.logFn('fail', `${fromNode ? fromNode.name : fromId} 付近で経路が途絶えました。送信失敗（不通・迂回回数の上限に達しました）`);
+      flow.rerender();
+      if (flow.onResolved) flow.onResolved('failed');
+      return;
+    }
+    const result = dijkstra(topology, fromId, flow.dstId);
+    if (!result.reachable) {
+      flow.state = 'failed';
+      flow.doneAt = Date.now();
+      if (flow.logFn) flow.logFn('fail', `${fromNode ? fromNode.name : fromId} 付近で経路が途絶えました。送信失敗（不通・迂回できる経路がありません）`);
+      flow.rerender();
+      if (flow.onResolved) flow.onResolved('failed');
+      return;
+    }
+    const history = flow.path.slice(0, flow.currentIndex + 1);
+    flow.path = history.concat(result.path.slice(1));
+    if (flow.logFn) flow.logFn('route', `${fromNode ? fromNode.name : fromId}: 障害を検知、迂回先を再計算 → 新しい経路（コスト${result.cost}）に変更`);
+    advanceFlowSegment(flow);
+  }
+
+  // 速度スライダー変更時：進行中の区間を、現在の進捗位置から新しい速度で再スケジュールする
+  function applyFlowSpeedChange(store) {
+    const now = Date.now();
+    store.flows.forEach((flow) => {
+      if (flow.state !== 'flowing' || !flow.segmentStartedAt) return;
+      const elapsed = now - flow.segmentStartedAt;
+      const progress = clamp(elapsed / flow.segmentDurationMs, 0, 0.97);
+      const newHopMs = HOP_BASE_MS / (store.speedFactor || 1);
+      const remaining = newHopMs * (1 - progress);
+      clearTimeout(flow.segmentTimer);
+      flow.segmentProgressAtRestart = progress;
+      flow.segmentStartedAt = now;
+      flow.segmentDurationMs = remaining;
+      flow.segmentTimer = setTimeout(() => onSegmentComplete(flow), remaining);
+      flow.rerender();
+    });
   }
 
   /* ---- 時間経過によるコスト自動変動／自動障害（共通） ---- */
 
   const DRIFT_INTERVAL_MS = 3000;
   const DRIFT_DELTAS = [-2, -1, 1, 2];
+  const AUTO_RECOVER_MIN_MS = 3000;
+  const AUTO_RECOVER_MAX_MS = 6000;
 
-  function driftTick(topology, store, logFn) {
+  // リンクのUP/DOWNはこの関数を通して変更する（自動復帰タイマーの管理を一元化するため）
+  function setLinkDownState(store, topology, link, downValue, logFn, rerender) {
+    if (downValue && !link.down) {
+      link.down = true;
+      if (store.autoRecoverEnabled) scheduleAutoRecover(store, topology, link, logFn, rerender);
+    } else if (!downValue && link.down) {
+      link.down = false;
+      if (link._recoveryTimer) { clearTimeout(link._recoveryTimer); link._recoveryTimer = null; }
+    }
+  }
+
+  function scheduleAutoRecover(store, topology, link, logFn, rerender) {
+    if (link._recoveryTimer) clearTimeout(link._recoveryTimer);
+    const wait = AUTO_RECOVER_MIN_MS + Math.random() * (AUTO_RECOVER_MAX_MS - AUTO_RECOVER_MIN_MS);
+    link._recoveryTimer = setTimeout(() => {
+      link._recoveryTimer = null;
+      if (!link.down) return;
+      link.down = false;
+      const na = topology.nodes.get(link.a), nb = topology.nodes.get(link.b);
+      const label = `${na ? na.name : link.a} — ${nb ? nb.name : link.b}`;
+      logFn('ok', `${label} が復旧しました（自動復帰）`);
+      rerender();
+    }, wait);
+  }
+
+  function enableAutoRecoverForCurrentDownLinks(store, topology, logFn, rerender) {
+    topology.links.forEach((l) => { if (l.down) scheduleAutoRecover(store, topology, l, logFn, rerender); });
+  }
+
+  function disableAutoRecoverTimers(topology) {
+    topology.links.forEach((l) => { if (l._recoveryTimer) { clearTimeout(l._recoveryTimer); l._recoveryTimer = null; } });
+  }
+
+  function driftTick(topology, store, logFn, rerender) {
     const routableLinks = topology.links.filter((l) => l.routable);
     routableLinks.forEach((link) => {
       if (link.down) return; // ダウン中はコスト変動を一時停止
       const failRoll = Math.random() * 100;
       if (failRoll < store.driftFailRate) {
-        link.down = true;
+        setLinkDownState(store, topology, link, true, logFn, rerender);
         const na = topology.nodes.get(link.a), nb = topology.nodes.get(link.b);
         const label = `${na ? na.name : link.a} — ${nb ? nb.name : link.b}`;
-        logFn('fail', `【時間経過】${label} でリンク障害が発生しました（手動で復旧してください）`);
+        logFn('fail', `【時間経過】${label} でリンク障害が発生しました${store.autoRecoverEnabled ? '（自動復帰します）' : '（手動で復旧してください）'}`);
         return;
       }
       const delta = DRIFT_DELTAS[Math.floor(Math.random() * DRIFT_DELTAS.length)];
@@ -499,7 +670,7 @@
   function startDriftTimer(topology, store, logFn, rerender) {
     stopDriftTimer(store);
     store.driftTimer = setInterval(() => {
-      driftTick(topology, store, logFn);
+      driftTick(topology, store, logFn, rerender);
       rerender();
     }, DRIFT_INTERVAL_MS);
   }
@@ -553,59 +724,28 @@
     logFn('sys', `送信開始: ${src.name} (${src.ip || '—'}) → ${dst.name} (${dst.ip || '—'})`, t); t += STEP;
 
     if (!result.reachable) {
-      if (opts.onRouteComputed) opts.onRouteComputed(result, { failureOnPath: false, reachedPath: null, failureLink: null });
+      if (opts.onRouteComputed) opts.onRouteComputed(result);
       logFn('fail', '到達可能な経路がありません（経路上の全リンクが障害中です）', t);
       if (opts.onFinish) setTimeout(() => opts.onFinish(result), t + 200);
       return;
     }
 
-    // 経路上のリンクID集合
-    const pathLinkIds = new Set();
-    for (let i = 0; i < result.path.length - 1; i++) {
-      const l = findLinkBetween(topology, result.path[i], result.path[i + 1]);
-      if (l) pathLinkIds.add(l.id);
-    }
+    if (opts.onRouteComputed) opts.onRouteComputed(result);
 
     // 送信直後（ARP解決あたり）に自動障害を抽選。3経路すべてのリンクが対象。
-    let failureLink = null;
+    // ここで当たったリンクが今回の経路に影響する場合でも、即座に失敗とはせず、
+    // 実際のアニメーション（フロー）側がリアルタイムに検知して迂回を試みる。
     if (opts.failRate) {
       const upRoutable = topology.links.filter((l) => l.routable && !l.down);
       if (upRoutable.length && Math.random() * 100 < opts.failRate) {
-        failureLink = upRoutable[Math.floor(Math.random() * upRoutable.length)];
+        const failureLink = upRoutable[Math.floor(Math.random() * upRoutable.length)];
+        const failLogDelay = t;
+        if (opts.markDown) opts.markDown(failureLink);
+        const na = topology.nodes.get(failureLink.a), nb = topology.nodes.get(failureLink.b);
+        const label = `${na ? na.name : failureLink.a} — ${nb ? nb.name : failureLink.b}`;
+        logFn('fail', `【自動障害】${label} でリンク障害が発生しました`, t); t += STEP;
+        if (opts.onLinkDown) setTimeout(() => opts.onLinkDown(), failLogDelay + 40);
       }
-    }
-    const failureOnPath = !!(failureLink && pathLinkIds.has(failureLink.id));
-
-    let reachedPath = null;
-    if (failureOnPath) {
-      let brokenAt = -1;
-      for (let i = 0; i < result.path.length - 1; i++) {
-        const l = findLinkBetween(topology, result.path[i], result.path[i + 1]);
-        if (l && l.id === failureLink.id) { brokenAt = i; break; }
-      }
-      reachedPath = brokenAt >= 0 ? result.path.slice(0, brokenAt + 1) : [srcId];
-    }
-
-    if (opts.onRouteComputed) opts.onRouteComputed(result, { failureOnPath, reachedPath, failureLink });
-
-    if (failureLink) {
-      failureLink.down = true;
-      const na = topology.nodes.get(failureLink.a), nb = topology.nodes.get(failureLink.b);
-      const label = `${na ? na.name : failureLink.a} — ${nb ? nb.name : failureLink.b}`;
-      const failLogDelay = t;
-      if (failureOnPath) {
-        logFn('fail', `【自動障害】${label} でリンク障害が発生しました（今回の送信が失敗します）`, t); t += STEP;
-      } else {
-        logFn('fail', `【自動障害】${label} でリンク障害が発生しました（次回送信から経路に反映されます）`, t); t += STEP;
-      }
-      if (opts.onLinkDown) setTimeout(() => opts.onLinkDown(), failLogDelay + 40);
-    }
-
-    if (failureOnPath) {
-      const lastNode = topology.nodes.get(reachedPath[reachedPath.length - 1]);
-      logFn('fail', `${lastNode.name} 付近で経路が途絶えました。送信失敗（不通）`, t); t += STEP;
-      if (opts.onFinish) setTimeout(() => opts.onFinish({ reachable: false, path: [], cost: Infinity }), t + 200);
-      return;
     }
 
     const gw = firstL3Hop(topology, result.path);
@@ -663,7 +803,9 @@
     driftEnabled: false,
     driftFailRate: 5,
     driftTimer: null,
-    openPopoverNodeId: null
+    openPopoverNodeId: null,
+    autoRecoverEnabled: false,
+    speedFactor: 1
   };
 
   function fixedLog(level, msg, delay) {
@@ -671,7 +813,7 @@
   }
 
   function fixedRender() {
-    renderTopology(Fixed.svg, Fixed.topo, { hoverNodeId: Fixed.hoverNodeId, flows: Fixed.flows });
+    renderTopology(Fixed.svg, Fixed.topo, { hoverNodeId: Fixed.hoverNodeId, flows: Fixed.flows, speedFactor: Fixed.speedFactor });
     fixedRenderRouteCompare();
     fixedRenderRoutingTable();
     if (Fixed.openPopoverNodeId) {
@@ -734,7 +876,7 @@
     wrap.querySelectorAll('.rt-toggle').forEach((btn) => {
       btn.addEventListener('click', () => {
         const link = Fixed.topo.links.find((l) => l.id === btn.dataset.linkId);
-        link.down = !link.down;
+        setLinkDownState(Fixed, Fixed.topo, link, !link.down, fixedLog, fixedRender);
         fixedLog('sys', `${link.id.replace('_', ' → ').toUpperCase()} を${link.down ? '障害（ダウン）状態に設定' : '復旧'}しました`);
         fixedRender();
       });
@@ -761,7 +903,7 @@
 
     if (Fixed.rtMode === 'preset') {
       // プリセットモードではコストは変更不可。UP/DOWNのみ即時切替。
-      link.down = !link.down;
+      setLinkDownState(Fixed, Fixed.topo, link, !link.down, fixedLog, fixedRender);
       fixedLog('sys', `${link.id.toUpperCase()} を${link.down ? '障害（ダウン）状態に設定' : '復旧'}しました`);
       fixedRender();
       return;
@@ -775,7 +917,7 @@
       initialDown: link.down,
       onSave: (cost, down) => {
         link.cost = cost;
-        link.down = down;
+        setLinkDownState(Fixed, Fixed.topo, link, down, fixedLog, fixedRender);
         fixedLog('sys', `${link.id.toUpperCase()} を更新しました（コスト=${cost}, 状態=${down ? 'DOWN' : 'UP'}）`);
         fixedRender();
       }
@@ -852,25 +994,24 @@
 
     const sendOpts = {
       failRate: Fixed.failRate,
+      markDown: (link) => setLinkDownState(Fixed, Fixed.topo, link, true, fixedLog, fixedRender),
       onLinkDown: () => fixedRender(),
-      onRouteComputed: (result, info) => {
+      onRouteComputed: (result) => {
         if (result.reachable) {
           const costs = getRouteCosts(Fixed.topo);
           const chosen = costs.find((c) => result.path.includes(c.mid));
           sendOpts.routeLabel = chosen ? `${chosen.label}（RT-S→${chosen.key}→RT-R）` : null;
         }
         // 経路比較パネルは選択結果を強調
-        renderRouteCompareWithChoice(result, info);
+        renderRouteCompareWithChoice(result, statusEl);
       },
       routeLabel: null,
-      onFinish: (result) => {
-        statusEl.textContent = result.reachable ? '送信完了' : '送信失敗（不通）';
-      }
+      onFinish: () => { /* 実際の到達可否はフローの解決時に statusEl を更新する */ }
     };
     simulateSend(Fixed.topo, srcId, dstId, fixedLog, Fixed.svg, sendOpts);
   }
 
-  function renderRouteCompareWithChoice(result, info) {
+  function renderRouteCompareWithChoice(result, statusEl) {
     const wrap = document.getElementById('route-compare');
     const costs = getRouteCosts(Fixed.topo);
     wrap.innerHTML = '';
@@ -886,12 +1027,14 @@
     });
 
     if (result.reachable) {
-      if (info && info.failureOnPath && info.reachedPath) {
-        startFlow(Fixed, Fixed.topo, info.reachedPath, fixedRender);
-      } else {
-        startFlow(Fixed, Fixed.topo, result.path, fixedRender);
+      const flow = startFlow(Fixed, Fixed.topo, result.path, fixedRender, fixedLog);
+      if (flow && statusEl) {
+        flow.onResolved = (state) => {
+          statusEl.textContent = state === 'done' ? '送信完了' : '送信失敗（不通）';
+        };
       }
     } else {
+      if (statusEl) statusEl.textContent = '送信失敗（不通）';
       fixedRender();
     }
   }
@@ -957,7 +1100,7 @@
     });
 
     document.getElementById('reset-links').addEventListener('click', () => {
-      Fixed.topo.links.forEach((l) => { l.down = false; });
+      Fixed.topo.links.forEach((l) => { setLinkDownState(Fixed, Fixed.topo, l, false, fixedLog, fixedRender); });
       Fixed.flows = [];
       fixedLog('sys', 'すべてのリンクを復旧し、経路のハイライトをリセットしました');
       fixedRender();
@@ -975,6 +1118,26 @@
     });
     document.getElementById('drift-fail-rate').addEventListener('input', (e) => {
       Fixed.driftFailRate = clamp(parseInt(e.target.value, 10) || 0, 0, 100);
+    });
+
+    document.getElementById('auto-recover-toggle').addEventListener('change', (e) => {
+      Fixed.autoRecoverEnabled = e.target.checked;
+      if (Fixed.autoRecoverEnabled) {
+        enableAutoRecoverForCurrentDownLinks(Fixed, Fixed.topo, fixedLog, fixedRender);
+        fixedLog('sys', '障害の自動復帰（3〜6秒）を有効にしました');
+      } else {
+        disableAutoRecoverTimers(Fixed.topo);
+        fixedLog('sys', '障害の自動復帰を停止しました（今後は手動復旧のみ）');
+      }
+    });
+
+    const flowSpeedInput = document.getElementById('flow-speed');
+    const flowSpeedOut = document.getElementById('flow-speed-out');
+    flowSpeedInput.addEventListener('input', () => {
+      Fixed.speedFactor = parseFloat(flowSpeedInput.value) || 1;
+      flowSpeedOut.textContent = Fixed.speedFactor.toFixed(1) + 'x';
+      applyFlowSpeedChange(Fixed);
+      fixedRender();
     });
 
     fixedLog('sys', '準備完了。送信元・宛先PCを選び「パケットを送信」を押してください。');
@@ -1037,7 +1200,9 @@
     driftEnabled: false,
     driftFailRate: 5,
     driftTimer: null,
-    failRate: 15
+    failRate: 15,
+    autoRecoverEnabled: false,
+    speedFactor: 1
   };
 
   function freeLog(level, msg, delay) { makeLogger(Free.logEl, Free.logBadge)(level, msg, delay); }
@@ -1381,6 +1546,7 @@
       hoverNodeId: Free.hoverNodeId,
       selectedNodeId: Free.linkFirstPick,
       flows: Free.flows,
+      speedFactor: Free.speedFactor,
       errorNodeIds: new Set(Array.from(Free.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
     });
   }
@@ -1498,6 +1664,7 @@
               node.ifaces[id] = { ip: `10.90.${Free.ifaceCounter}.1`, mask: '/30' };
             }
           });
+          if (down && Free.autoRecoverEnabled) scheduleAutoRecover(Free, Free.topo, link, freeLog, freeRender);
           freeLog('sys', `${nodeA.name} — ${nodeB.name} を接続しました`);
           freeRevalidateAndRender();
         }
@@ -1524,7 +1691,7 @@
       initialDown: link.down,
       onSave: (cost, down) => {
         if (link.routable) link.cost = cost;
-        link.down = down;
+        setLinkDownState(Free, Free.topo, link, down, freeLog, freeRender);
         freeLog('sys', `${nodeA.name} — ${nodeB.name} を更新しました`);
         freeRender();
       }
@@ -1541,17 +1708,21 @@
     statusEl.textContent = '送信中…';
     simulateSend(Free.topo, srcId, dstId, freeLog, Free.svg, {
       failRate: Free.failRate,
+      markDown: (link) => setLinkDownState(Free, Free.topo, link, true, freeLog, freeRender),
       onLinkDown: () => freeRender(),
-      onRouteComputed: (result, info) => {
+      onRouteComputed: (result) => {
         if (result.reachable) {
-          if (info && info.failureOnPath && info.reachedPath) {
-            startFlow(Free, Free.topo, info.reachedPath, freeRender);
-          } else {
-            startFlow(Free, Free.topo, result.path, freeRender);
+          const flow = startFlow(Free, Free.topo, result.path, freeRender, freeLog);
+          if (flow) {
+            flow.onResolved = (state) => {
+              statusEl.textContent = state === 'done' ? '送信完了' : '送信失敗（不通）';
+            };
           }
+        } else {
+          statusEl.textContent = '送信失敗（不通）';
         }
       },
-      onFinish: (result) => { statusEl.textContent = result.reachable ? '送信完了' : '送信失敗（不通）'; }
+      onFinish: () => { /* 実際の到達可否はフローの解決時に statusEl を更新する */ }
     });
   }
 
@@ -1617,6 +1788,26 @@
     });
     document.getElementById('free-drift-fail-rate').addEventListener('input', (e) => {
       Free.driftFailRate = clamp(parseInt(e.target.value, 10) || 0, 0, 100);
+    });
+
+    document.getElementById('free-auto-recover-toggle').addEventListener('change', (e) => {
+      Free.autoRecoverEnabled = e.target.checked;
+      if (Free.autoRecoverEnabled) {
+        enableAutoRecoverForCurrentDownLinks(Free, Free.topo, freeLog, freeRender);
+        freeLog('sys', '障害の自動復帰（3〜6秒）を有効にしました');
+      } else {
+        disableAutoRecoverTimers(Free.topo);
+        freeLog('sys', '障害の自動復帰を停止しました（今後は手動復旧のみ）');
+      }
+    });
+
+    const freeFlowSpeedInput = document.getElementById('free-flow-speed');
+    const freeFlowSpeedOut = document.getElementById('free-flow-speed-out');
+    freeFlowSpeedInput.addEventListener('input', () => {
+      Free.speedFactor = parseFloat(freeFlowSpeedInput.value) || 1;
+      freeFlowSpeedOut.textContent = Free.speedFactor.toFixed(1) + 'x';
+      applyFlowSpeedChange(Free);
+      freeRender();
     });
 
     // クリック（ノード／リンク）

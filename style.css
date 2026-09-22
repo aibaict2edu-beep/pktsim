@@ -433,8 +433,17 @@ input[type="range"]{
   stroke-width: 3;
   opacity: .85;
 }
+.flow-line.is-failed{
+  stroke-width: 3;
+  stroke-dasharray: 4 4;
+  opacity: .6;
+}
 @keyframes flow-dash{
   to{ stroke-dashoffset: -32; }
+}
+
+.pkt-icon{
+  filter: drop-shadow(0 0 4px rgba(0,0,0,.5));
 }
 
 /* node error indicator */
