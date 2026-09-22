@@ -83,7 +83,7 @@
 
       <section class="card card-grow">
         <div class="card-title-row">
-          <h2 class="card-title">ログ</h2>
+          <h2 class="card-title">ログ<span class="log-badge" id="log-badge" hidden>0</span></h2>
           <button class="btn btn-mini" id="clear-log">クリア</button>
         </div>
         <div id="log" class="log" aria-live="polite"></div>
@@ -120,6 +120,7 @@
       <div class="stage-canvas-wrap">
         <svg id="free-svg" class="topo-svg" viewBox="0 0 1120 560" preserveAspectRatio="xMidYMid meet" aria-label="自由配置ネットワーク構成図"></svg>
         <p class="stage-hint" id="free-hint">「接続」モードで2つのノードを順にクリックするとリンクを作成します。</p>
+        <div class="ip-popover is-hidden" id="ip-popover"></div>
       </div>
     </section>
 
@@ -141,7 +142,7 @@
 
       <section class="card card-grow">
         <div class="card-title-row">
-          <h2 class="card-title">ログ</h2>
+          <h2 class="card-title">ログ<span class="log-badge" id="free-log-badge" hidden>0</span></h2>
           <button class="btn btn-mini" id="free-clear-log">クリア</button>
         </div>
         <div id="free-log" class="log" aria-live="polite"></div>

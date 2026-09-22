@@ -38,6 +38,77 @@
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+  const FLOW_PALETTE = ['#4fd8c4', '#f0a94e', '#e2584c', '#8ab4d6', '#c99ae0', '#9fd68a', '#f2789a', '#f7d774'];
+
+  /* ------------------------------------------------------------------ *
+   * 0b. IPアドレス／サブネットマスク ユーティリティ
+   * ------------------------------------------------------------------ */
+
+  function parseIp(str) {
+    if (typeof str !== 'string') return null;
+    const m = str.trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!m) return null;
+    const parts = m.slice(1, 5).map(Number);
+    if (parts.some((p) => p < 0 || p > 255)) return null;
+    return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+  }
+
+  function isValidIpFormat(str) { return parseIp(str) !== null; }
+
+  // "/24" または "255.255.255.0" のどちらも受け付け、プレフィックス長(0-32)を返す。不正なら null。
+  function parseMaskToPrefix(str) {
+    if (typeof str !== 'string') return null;
+    const s = str.trim();
+    if (s.startsWith('/')) {
+      const n = parseInt(s.slice(1), 10);
+      if (Number.isInteger(n) && n >= 0 && n <= 32 && String(n) === s.slice(1)) return n;
+      return null;
+    }
+    const asIp = parseIp(s);
+    if (asIp === null) return null;
+    const unsigned = asIp >>> 0;
+    // 連続した1のあとに連続した0が続く形式かどうかを検証
+    let prefix = 0;
+    let seenZero = false;
+    for (let bit = 31; bit >= 0; bit--) {
+      const isOne = (unsigned >>> bit) & 1;
+      if (isOne) {
+        if (seenZero) return null; // 0の後に1が来る＝不正なマスク
+        prefix++;
+      } else {
+        seenZero = true;
+      }
+    }
+    return prefix;
+  }
+
+  function isValidMaskFormat(str) { return parseMaskToPrefix(str) !== null; }
+
+  function networkKey(ip, prefix) {
+    const ipInt = parseIp(ip);
+    if (ipInt === null || prefix === null) return null;
+    const maskBits = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+    return ((ipInt & maskBits) >>> 0) + '/' + prefix;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 0c. 単純Union-Find（自由配置のサブネット判定に使用）
+   * ------------------------------------------------------------------ */
+
+  function createUnionFind() {
+    const parent = new Map();
+    function find(x) {
+      if (!parent.has(x)) parent.set(x, x);
+      if (parent.get(x) !== x) parent.set(x, find(parent.get(x)));
+      return parent.get(x);
+    }
+    function union(a, b) {
+      const ra = find(a), rb = find(b);
+      if (ra !== rb) parent.set(ra, rb);
+    }
+    return { find, union, keys: () => Array.from(parent.keys()) };
+  }
+
   /* ------------------------------------------------------------------ *
    * 1. グラフ／ダイクストラ法
    * ------------------------------------------------------------------ *
@@ -193,6 +264,14 @@
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
+  function formatIpMask(ip, mask) {
+    if (!ip) return '';
+    if (!mask) return ip;
+    const prefix = parseMaskToPrefix(mask);
+    return prefix !== null ? `${ip}/${prefix}` : `${ip} ${mask}`;
+  }
+
+
   function nodeSize(type) {
     if (type === 'pc') return { w: 58, h: 42 };
     if (type === 'switch') return { w: 76, h: 38 };
@@ -264,13 +343,17 @@
       }
     });
 
+    // 送信中／送信済みの経路を表すフロー（流れるライン）オーバーレイ
+    html += renderFlowOverlay(topology, state.flows);
+
     // nodes
     topology.nodes.forEach((n) => {
       const size = nodeSize(n.type);
       const isRouter = n.type === 'router';
       const isSelected = state.selectedNodeId === n.id;
       const isHover = state.hoverNodeId === n.id;
-      let boxCls = 'n-box' + (isRouter ? ' is-router' : '') + (isHover ? ' is-hover' : '');
+      const hasError = state.errorNodeIds && state.errorNodeIds.has(n.id);
+      let boxCls = 'n-box' + (isRouter ? ' is-router' : '') + (isHover ? ' is-hover' : '') + (hasError ? ' has-error' : '');
       let groupCls = state.freeMode ? 'free-node' : 'topo-node';
       if (isSelected) groupCls += ' is-selected';
       const title = `${n.name}${n.ip ? '\n' + n.ip : ''}${n.mac ? '\n' + n.mac : ''}`;
@@ -279,51 +362,80 @@
         <rect class="${boxCls}" x="${-size.w / 2}" y="${-size.h / 2}" width="${size.w}" height="${size.h}" rx="${isRouter ? 10 : 5}"></rect>
         ${nodeIconMarkup(n.type)}
         <text class="n-label" y="${size.h / 2 + 15}">${n.name}</text>
-        ${n.ip ? `<text class="n-sub" y="${size.h / 2 + 27}">${n.ip}</text>` : ''}
+        ${n.ip ? `<text class="n-sub" y="${size.h / 2 + 27}">${formatIpMask(n.ip, n.mask)}</text>` : ''}
+        ${hasError ? `<g class="n-error-badge" transform="translate(${size.w / 2 - 4},${-size.h / 2 + 4})"><circle r="8"></circle><text y="4">!</text></g>` : ''}
       </g>`;
     });
 
     svgEl.innerHTML = html;
   }
 
-  function animatePacket(svgEl, topology, path, opts) {
-    opts = opts || {};
-    if (!path || path.length < 2) return;
-    let d = '';
-    path.forEach((id, i) => {
-      const n = topology.nodes.get(id);
-      if (!n) return;
-      d += (i === 0 ? 'M ' : 'L ') + n.x + ' ' + n.y + ' ';
+  function renderFlowOverlay(topology, flows) {
+    if (!flows || !flows.length) return '';
+    const groups = new Map();
+    flows.forEach((flow) => {
+      for (let i = 0; i < flow.path.length - 1; i++) {
+        const aId = flow.path[i], bId = flow.path[i + 1];
+        const a = topology.nodes.get(aId), b = topology.nodes.get(bId);
+        if (!a || !b) continue;
+        const key = [aId, bId].sort().join('|');
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push({ flow, a, b });
+      }
     });
+    let html = '';
+    groups.forEach((entries) => {
+      const n = entries.length;
+      entries.forEach((e, idx) => {
+        const offset = (idx - (n - 1) / 2) * 5;
+        const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const px = -dy / len, py = dx / len;
+        const pad = Math.max(nodeSize(e.a.type).w, nodeSize(e.a.type).h) / 2 + 4;
+        const pts = shortenedEndpoints(e.a.x, e.a.y, e.b.x, e.b.y, pad);
+        const x1 = pts.x1 + px * offset, y1 = pts.y1 + py * offset;
+        const x2 = pts.x2 + px * offset, y2 = pts.y2 + py * offset;
+        const cls = 'flow-line ' + (e.flow.state === 'flowing' ? 'is-flowing' : 'is-done');
+        html += `<line class="${cls}" stroke="${e.flow.color}" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}"></line>`;
+      });
+    });
+    return html;
+  }
+
+  function nextFlowColor(store) {
+    const c = FLOW_PALETTE[store.colorIdx % FLOW_PALETTE.length];
+    store.colorIdx += 1;
+    return c;
+  }
+
+  function startFlow(store, topology, path, rerender) {
+    if (!path || path.length < 2) return;
     const dur = Math.max(0.9, (path.length - 1) * 0.7);
-    const dot = document.createElementNS(SVG_NS, 'circle');
-    dot.setAttribute('r', '6');
-    dot.setAttribute('class', 'pkt-dot');
-    const motion = document.createElementNS(SVG_NS, 'animateMotion');
-    motion.setAttribute('dur', dur + 's');
-    motion.setAttribute('path', d.trim());
-    motion.setAttribute('fill', 'freeze');
-    motion.setAttribute('repeatCount', '1');
-    dot.appendChild(motion);
-    svgEl.appendChild(dot);
-    setTimeout(() => { if (dot.parentNode) dot.parentNode.removeChild(dot); }, dur * 1000 + 150);
-    if (typeof opts.onDone === 'function') setTimeout(opts.onDone, dur * 1000);
+    const flow = { id: uid('flow'), path: path.slice(), color: nextFlowColor(store), state: 'flowing', dur };
+    store.flows.push(flow);
+    rerender();
+    setTimeout(() => { flow.state = 'done'; rerender(); }, dur * 1000);
   }
 
   /* ------------------------------------------------------------------ *
    * 4. ログ出力
    * ------------------------------------------------------------------ */
 
-  function makeLogger(containerEl) {
+  function makeLogger(containerEl, badgeEl) {
     return function log(level, msg, delay) {
       const write = () => {
-        const line = el('div', 'log-line lv-' + level);
+        const line = el('div', 'log-line lv-' + level + ' is-new');
         const t = el('span', 'log-time', nowStamp());
         const m = el('span', 'log-msg', msg);
         line.appendChild(t);
         line.appendChild(m);
         containerEl.appendChild(line);
         containerEl.scrollTop = containerEl.scrollHeight;
+        setTimeout(() => line.classList.remove('is-new'), 1150);
+        if (badgeEl) {
+          badgeEl.textContent = String(containerEl.children.length);
+          badgeEl.hidden = false;
+        }
       };
       if (delay) setTimeout(write, delay);
       else write();
@@ -389,8 +501,6 @@
 
     logFn('ok', `${dst.name}: フレーム受信 → デカプセル化 → パケット到達（通信成功）`, t); t += STEP;
 
-    animatePacket(svgEl, topology, result.path);
-
     if (opts.onFinish) setTimeout(() => opts.onFinish(result), t + 200);
   }
 
@@ -402,17 +512,20 @@
     topo: makeFixedTopology(),
     svg: null,
     logEl: null,
+    logBadge: null,
     rtMode: 'preset',
     failRate: 15,
-    hoverNodeId: null
+    hoverNodeId: null,
+    flows: [],
+    colorIdx: 0
   };
 
   function fixedLog(level, msg, delay) {
-    makeLogger(Fixed.logEl)(level, msg, delay);
+    makeLogger(Fixed.logEl, Fixed.logBadge)(level, msg, delay);
   }
 
   function fixedRender() {
-    renderTopology(Fixed.svg, Fixed.topo, { hoverNodeId: Fixed.hoverNodeId });
+    renderTopology(Fixed.svg, Fixed.topo, { hoverNodeId: Fixed.hoverNodeId, flows: Fixed.flows });
     fixedRenderRouteCompare();
     fixedRenderRoutingTable();
   }
@@ -573,21 +686,17 @@
       wrap.appendChild(row);
     });
 
-    // ハイライトするリンクをSVGに反映
-    const activeIds = new Set();
     if (result.reachable) {
-      for (let i = 0; i < result.path.length - 1; i++) {
-        const l = findLinkBetween(Fixed.topo, result.path[i], result.path[i + 1]);
-        if (l) activeIds.add(l.id);
-      }
+      startFlow(Fixed, Fixed.topo, result.path, fixedRender);
+    } else {
+      fixedRender();
     }
-    renderTopology(Fixed.svg, Fixed.topo, { activePathLinkIds: activeIds, hoverNodeId: Fixed.hoverNodeId });
-    setTimeout(() => fixedRender(), 2600);
   }
 
   function initFixedMode() {
     Fixed.svg = document.getElementById('topo-svg');
     Fixed.logEl = document.getElementById('log');
+    Fixed.logBadge = document.getElementById('log-badge');
     fixedPopulateSelects();
     fixedRender();
 
@@ -602,7 +711,11 @@
     });
 
     document.getElementById('send-btn').addEventListener('click', fixedSend);
-    document.getElementById('clear-log').addEventListener('click', () => { Fixed.logEl.innerHTML = ''; });
+    document.getElementById('clear-log').addEventListener('click', () => {
+      Fixed.logEl.innerHTML = '';
+      Fixed.logBadge.hidden = true;
+      Fixed.logBadge.textContent = '0';
+    });
 
     document.getElementById('rt-mode').addEventListener('change', (e) => {
       Fixed.rtMode = e.target.value;
@@ -627,7 +740,8 @@
 
     document.getElementById('reset-links').addEventListener('click', () => {
       Fixed.topo.links.forEach((l) => { l.down = false; });
-      fixedLog('sys', 'すべてのリンクを復旧しました');
+      Fixed.flows = [];
+      fixedLog('sys', 'すべてのリンクを復旧し、経路のハイライトをリセットしました');
       fixedRender();
     });
 
@@ -676,34 +790,312 @@
     topo: { nodes: new Map(), links: [] },
     svg: null,
     logEl: null,
+    logBadge: null,
     interactionMode: 'move',
     linkFirstPick: null,
     hoverNodeId: null,
     typeCounters: { pc: 0, switch: 0, router: 0 },
     placeCursor: { x: 140, y: 120 },
-    dragging: null
+    dragging: null,
+    flows: [],
+    colorIdx: 0,
+    ifaceCounter: 0,
+    openPopoverNodeId: null,
+    nodeErrors: new Map()
   };
 
-  function freeLog(level, msg, delay) { makeLogger(Free.logEl)(level, msg, delay); }
+  function freeLog(level, msg, delay) { makeLogger(Free.logEl, Free.logBadge)(level, msg, delay); }
 
   const FREE_TYPE_LABEL = { pc: 'PC', switch: 'SW', router: 'RT' };
+
+  /* ---- IPアドレス／サブネット整合性チェック（自由配置） ---- */
+
+  function freeBuildClusters(topo) {
+    const uf = createUnionFind();
+    topo.nodes.forEach((n) => { if (n.type !== 'router') uf.find(n.id); });
+    topo.links.forEach((l) => {
+      const na = topo.nodes.get(l.a), nb = topo.nodes.get(l.b);
+      if (!na || !nb) return;
+      const keyA = na.type === 'router' ? `${na.id}::${l.id}` : na.id;
+      const keyB = nb.type === 'router' ? `${nb.id}::${l.id}` : nb.id;
+      if (na.type !== 'router' && nb.type !== 'router') {
+        uf.union(keyA, keyB);
+      } else if (na.type === 'router' && nb.type !== 'router') {
+        if (nb.type === 'switch') uf.union(keyA, keyB); else uf.find(keyA);
+      } else if (nb.type === 'router' && na.type !== 'router') {
+        if (na.type === 'switch') uf.union(keyB, keyA); else uf.find(keyB);
+      } else {
+        uf.find(keyA); uf.find(keyB);
+      }
+    });
+    return uf;
+  }
+
+  function freeResolveEntry(topo, key) {
+    if (key.includes('::')) {
+      const idx = key.indexOf('::');
+      const routerId = key.slice(0, idx), linkId = key.slice(idx + 2);
+      const r = topo.nodes.get(routerId);
+      const iface = r && r.ifaces && r.ifaces[linkId];
+      if (!iface) return null;
+      return { ip: iface.ip, mask: iface.mask, ownerNodeId: routerId, ifaceKey: linkId };
+    }
+    const n = topo.nodes.get(key);
+    if (n && n.type === 'pc') return { ip: n.ip, mask: n.mask, ownerNodeId: key, ifaceKey: null };
+    return null; // スイッチはIPを持たない
+  }
+
+  function freeMarkError(errorMap, entry, kind) {
+    if (!entry) return;
+    const nodeId = entry.ownerNodeId;
+    if (!errorMap.has(nodeId)) errorMap.set(nodeId, { hasError: false, self: {}, ifaces: {} });
+    const rec = errorMap.get(nodeId);
+    rec.hasError = true;
+    const target = entry.ifaceKey ? (rec.ifaces[entry.ifaceKey] || (rec.ifaces[entry.ifaceKey] = {})) : rec.self;
+    target[kind] = true;
+  }
+
+  function freeValidate() {
+    const errorMap = new Map();
+    Free.topo.nodes.forEach((n) => { errorMap.set(n.id, { hasError: false, self: {}, ifaces: {} }); });
+
+    // 1) 書式チェック + 2) 重複チェック 用にエントリを収集
+    const entries = [];
+    Free.topo.nodes.forEach((n) => {
+      if (n.type === 'pc') {
+        entries.push({ ip: n.ip, mask: n.mask, ownerNodeId: n.id, ifaceKey: null });
+      } else if (n.type === 'router') {
+        Object.keys(n.ifaces || {}).forEach((linkId) => {
+          const iface = n.ifaces[linkId];
+          entries.push({ ip: iface.ip, mask: iface.mask, ownerNodeId: n.id, ifaceKey: linkId });
+        });
+      }
+    });
+
+    entries.forEach((e) => {
+      e.formatOk = isValidIpFormat(e.ip) && isValidMaskFormat(e.mask);
+      if (!e.formatOk) freeMarkError(errorMap, e, 'format');
+    });
+
+    const byIp = new Map();
+    entries.forEach((e) => {
+      const key = (e.ip || '').trim();
+      if (!key) return;
+      if (!byIp.has(key)) byIp.set(key, []);
+      byIp.get(key).push(e);
+    });
+    byIp.forEach((list) => {
+      if (list.length > 1) list.forEach((e) => freeMarkError(errorMap, e, 'dup'));
+    });
+
+    // 3) サブネット整合性チェック（スイッチのみ経由 = 同一サブネット）
+    const uf = freeBuildClusters(Free.topo);
+    const clusters = new Map();
+    uf.keys().forEach((key) => {
+      const root = uf.find(key);
+      if (!clusters.has(root)) clusters.set(root, []);
+      clusters.get(root).push(key);
+    });
+    clusters.forEach((keys) => {
+      const resolved = keys
+        .map((k) => ({ key: k, entry: freeResolveEntry(Free.topo, k) }))
+        .filter((r) => r.entry && isValidIpFormat(r.entry.ip) && isValidMaskFormat(r.entry.mask));
+      if (resolved.length < 2) return;
+      const tally = new Map();
+      resolved.forEach((r) => {
+        const nk = networkKey(r.entry.ip, parseMaskToPrefix(r.entry.mask));
+        tally.set(nk, (tally.get(nk) || 0) + 1);
+      });
+      let majorityNet = null, majorityCount = -1;
+      tally.forEach((count, nk) => { if (count > majorityCount) { majorityCount = count; majorityNet = nk; } });
+      resolved.forEach((r) => {
+        const nk = networkKey(r.entry.ip, parseMaskToPrefix(r.entry.mask));
+        if (nk !== majorityNet) freeMarkError(errorMap, r.entry, 'subnet');
+      });
+    });
+
+    // 直結リンク（ルーター⇔ルーター／ルーター⇔PC）は異なるサブネットである必要がある
+    Free.topo.links.forEach((l) => {
+      const na = Free.topo.nodes.get(l.a), nb = Free.topo.nodes.get(l.b);
+      if (!na || !nb) return;
+      const bothRouters = na.type === 'router' && nb.type === 'router';
+      const routerToPc = (na.type === 'router' && nb.type === 'pc') || (nb.type === 'router' && na.type === 'pc');
+      if (!bothRouters && !routerToPc) return;
+      const keyA = na.type === 'router' ? `${na.id}::${l.id}` : na.id;
+      const keyB = nb.type === 'router' ? `${nb.id}::${l.id}` : nb.id;
+      const ea = freeResolveEntry(Free.topo, keyA), eb = freeResolveEntry(Free.topo, keyB);
+      if (!ea || !eb) return;
+      if (!isValidIpFormat(ea.ip) || !isValidMaskFormat(ea.mask) || !isValidIpFormat(eb.ip) || !isValidMaskFormat(eb.mask)) return;
+      const na1 = networkKey(ea.ip, parseMaskToPrefix(ea.mask));
+      const nb1 = networkKey(eb.ip, parseMaskToPrefix(eb.mask));
+      if (na1 === nb1) { freeMarkError(errorMap, ea, 'subnet'); freeMarkError(errorMap, eb, 'subnet'); }
+    });
+
+    Free.nodeErrors = errorMap;
+  }
+
+  function freeHasAnyError() {
+    let any = false;
+    Free.nodeErrors.forEach((v) => { if (v.hasError) any = true; });
+    return any;
+  }
+
+  function freeUpdateSendButtonState() {
+    const btn = document.getElementById('free-send-btn');
+    const statusEl = document.getElementById('free-send-status');
+    const hasError = freeHasAnyError();
+    btn.disabled = hasError;
+    if (hasError && !statusEl.textContent) statusEl.textContent = 'IPアドレス設定にエラーがあるため送信できません。';
+    if (!hasError && statusEl.textContent === 'IPアドレス設定にエラーがあるため送信できません。') statusEl.textContent = '';
+  }
+
+  function freeRevalidateAndRender() {
+    freeValidate();
+    freeRender();
+    freeUpdateSendButtonState();
+    if (Free.openPopoverNodeId) renderIpPopoverContent(Free.topo.nodes.get(Free.openPopoverNodeId));
+  }
+
+  /* ---- IP編集ポップオーバー ---- */
+
+  function svgToScreen(svgEl, x, y) {
+    const pt = svgEl.createSVGPoint();
+    pt.x = x; pt.y = y;
+    const ctm = svgEl.getScreenCTM();
+    if (!ctm) return { x: 0, y: 0 };
+    return pt.matrixTransform(ctm);
+  }
+
+  function positionIpPopover(node) {
+    const pop = document.getElementById('ip-popover');
+    const wrap = Free.svg.closest('.stage-canvas-wrap');
+    if (!node || !wrap) return;
+    const screenPt = svgToScreen(Free.svg, node.x, node.y);
+    const wrapRect = wrap.getBoundingClientRect();
+    let left = screenPt.x - wrapRect.left + 36;
+    let top = screenPt.y - wrapRect.top - 20;
+    left = clamp(left, 8, wrapRect.width - 240);
+    top = clamp(top, 8, wrapRect.height - 20);
+    pop.style.left = left + 'px';
+    pop.style.top = top + 'px';
+  }
+
+  function renderIpPopoverContent(node) {
+    const pop = document.getElementById('ip-popover');
+    if (!node) return;
+    const errRec = Free.nodeErrors.get(node.id) || { self: {}, ifaces: {} };
+
+    function fieldErrorText(errObj) {
+      if (!errObj) return '';
+      if (errObj.format) return '書式が正しくありません（例: 192.168.1.1 と /24 または 255.255.255.0）';
+      if (errObj.dup) return 'このIPアドレスは他のノードと重複しています';
+      if (errObj.subnet) return '接続関係から見てサブネットが不整合です';
+      return '';
+    }
+
+    function ifaceBlockHtml(label, ip, mask, errObj, dataKey) {
+      const hasErr = errObj && (errObj.format || errObj.dup || errObj.subnet);
+      return `<div class="iface-block">
+        <div class="iface-label">${label}</div>
+        <div class="iface-row">
+          <input type="text" class="ip-field ${errObj && errObj.format ? 'has-error' : (hasErr ? 'has-error' : '')}" data-key="${dataKey}" data-field="ip" value="${ip || ''}" placeholder="192.168.1.1">
+          <input type="text" class="mask-input ${hasErr ? 'has-error' : ''}" data-key="${dataKey}" data-field="mask" value="${mask || ''}" placeholder="/24">
+        </div>
+        <div class="iface-error-msg">${fieldErrorText(errObj)}</div>
+      </div>`;
+    }
+
+    let body = '';
+    if (node.type === 'pc') {
+      body = ifaceBlockHtml('IPアドレス／マスク', node.ip, node.mask, errRec.self, 'self');
+    } else if (node.type === 'router') {
+      const linkIds = Object.keys(node.ifaces || {});
+      if (linkIds.length === 0) {
+        body = '<p class="iface-empty">まだリンクが接続されていません。</p>';
+      } else {
+        body = linkIds.map((linkId) => {
+          const link = Free.topo.links.find((l) => l.id === linkId);
+          const otherId = link ? (link.a === node.id ? link.b : link.a) : null;
+          const other = otherId ? Free.topo.nodes.get(otherId) : null;
+          const label = `→ ${other ? other.name : '?'} 側`;
+          const iface = node.ifaces[linkId];
+          return ifaceBlockHtml(label, iface.ip, iface.mask, errRec.ifaces[linkId], linkId);
+        }).join('');
+      }
+    }
+
+    pop.innerHTML = `<div class="ip-popover-title"><span>${node.name} の設定</span><button type="button" class="ip-popover-close" id="ip-popover-close">×</button></div>${body}`;
+
+    pop.querySelectorAll('.ip-field, .mask-input').forEach((input) => {
+      input.addEventListener('input', () => {
+        const key = input.dataset.key, field = input.dataset.field;
+        if (node.type === 'pc') {
+          if (field === 'ip') node.ip = input.value; else node.mask = input.value;
+        } else if (node.type === 'router') {
+          if (!node.ifaces[key]) node.ifaces[key] = { ip: '', mask: '' };
+          if (field === 'ip') node.ifaces[key].ip = input.value; else node.ifaces[key].mask = input.value;
+        }
+        freeValidate();
+        freeRender();
+        freeUpdateSendButtonState();
+        refreshIpPopoverFieldStyles(node);
+      });
+    });
+    document.getElementById('ip-popover-close').addEventListener('click', closeIpPopover);
+  }
+
+  function refreshIpPopoverFieldStyles(node) {
+    const pop = document.getElementById('ip-popover');
+    const errRec = Free.nodeErrors.get(node.id) || { self: {}, ifaces: {} };
+    pop.querySelectorAll('.ip-field, .mask-input').forEach((input) => {
+      const key = input.dataset.key;
+      const errObj = key === 'self' ? errRec.self : errRec.ifaces[key];
+      const hasErr = errObj && (errObj.format || errObj.dup || errObj.subnet);
+      input.classList.toggle('has-error', !!hasErr);
+      const msgEl = input.closest('.iface-block').querySelector('.iface-error-msg');
+      if (msgEl) {
+        msgEl.textContent = errObj && errObj.format ? '書式が正しくありません（例: 192.168.1.1 と /24 または 255.255.255.0）'
+          : errObj && errObj.dup ? 'このIPアドレスは他のノードと重複しています'
+          : errObj && errObj.subnet ? '接続関係から見てサブネットが不整合です' : '';
+      }
+    });
+  }
+
+  function openIpPopover(nodeId) {
+    const node = Free.topo.nodes.get(nodeId);
+    if (!node) return;
+    Free.openPopoverNodeId = nodeId;
+    renderIpPopoverContent(node);
+    positionIpPopover(node);
+    document.getElementById('ip-popover').classList.remove('is-hidden');
+    freeRender();
+  }
+
+  function closeIpPopover() {
+    Free.openPopoverNodeId = null;
+    document.getElementById('ip-popover').classList.add('is-hidden');
+  }
 
   function freeAddNode(type) {
     Free.typeCounters[type] += 1;
     const n = Free.typeCounters[type];
     const id = uid('f' + type);
     const name = `${FREE_TYPE_LABEL[type]}-${n}`;
-    let ip = null, mac = randMac();
-    if (type === 'pc' || type === 'router') {
-      ip = `10.${type === 'pc' ? 20 : 30}.0.${n}`;
+    const mac = randMac();
+    const node = { id, type, name, mac, x: 0, y: 0 };
+    if (type === 'pc') {
+      node.ip = `10.20.0.${n}`;
+      node.mask = '/24';
+    } else if (type === 'router') {
+      node.ifaces = {}; // linkId -> {ip, mask}
     }
     // カスケード配置（重なり回避の簡易ロジック）
     const cols = 6;
     const idx = Free.topo.nodes.size;
-    const x = 140 + (idx % cols) * 160;
-    const y = 100 + Math.floor(idx / cols) * 150;
-    Free.topo.nodes.set(id, { id, type, name, ip, mac, x, y });
-    freeRender();
+    node.x = 140 + (idx % cols) * 160;
+    node.y = 100 + Math.floor(idx / cols) * 150;
+    Free.topo.nodes.set(id, node);
+    freeRevalidateAndRender();
     freePopulateSelects();
     freeLog('sys', `${name} を追加しました`);
   }
@@ -712,7 +1104,9 @@
     renderTopology(Free.svg, Free.topo, {
       freeMode: true,
       hoverNodeId: Free.hoverNodeId,
-      selectedNodeId: Free.linkFirstPick
+      selectedNodeId: Free.linkFirstPick,
+      flows: Free.flows,
+      errorNodeIds: new Set(Array.from(Free.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
     });
   }
 
@@ -741,23 +1135,45 @@
   function freeSetMode(mode) {
     Free.interactionMode = mode;
     Free.linkFirstPick = null;
+    closeIpPopover();
     document.querySelectorAll('#panel-free [data-mode]').forEach((b) => {
       b.classList.toggle('is-active', b.dataset.mode === mode);
     });
     const hint = document.getElementById('free-hint');
-    if (mode === 'move') hint.textContent = 'ノードをドラッグして移動できます。リンクをクリックするとコスト／障害を編集できます。';
-    if (mode === 'link') hint.textContent = '「接続」モードで2つのノードを順にクリックするとリンクを作成します。';
+    if (mode === 'move') hint.textContent = 'ノードをドラッグして移動できます。PC／ルーターをクリックするとIP設定を編集できます。';
+    if (mode === 'link') hint.textContent = '「接続」モードで2つのノードを順にクリックするとリンクを作成します（ルーターは最大2本まで）。';
     if (mode === 'delete') hint.textContent = '「削除」モードでノードまたはリンクをクリックすると削除します。';
     freeRender();
   }
 
+  function freeLinkCountForNode(nodeId) {
+    return Free.topo.links.filter((l) => l.a === nodeId || l.b === nodeId).length;
+  }
+
+  function freeRemoveLinkIfaces(link) {
+    [link.a, link.b].forEach((nid) => {
+      const n = Free.topo.nodes.get(nid);
+      if (n && n.type === 'router' && n.ifaces) delete n.ifaces[link.id];
+    });
+  }
+
   function freeHandleNodeClick(nodeId) {
+    if (Free.interactionMode === 'move') {
+      const n = Free.topo.nodes.get(nodeId);
+      if (!n || n.type === 'switch') return;
+      if (Free.openPopoverNodeId === nodeId) { closeIpPopover(); freeRender(); return; }
+      openIpPopover(nodeId);
+      return;
+    }
     if (Free.interactionMode === 'delete') {
+      const linksToRemove = Free.topo.links.filter((l) => l.a === nodeId || l.b === nodeId);
+      linksToRemove.forEach(freeRemoveLinkIfaces);
       Free.topo.links = Free.topo.links.filter((l) => l.a !== nodeId && l.b !== nodeId);
       const n = Free.topo.nodes.get(nodeId);
       Free.topo.nodes.delete(nodeId);
+      if (Free.openPopoverNodeId === nodeId) closeIpPopover();
       freeLog('sys', `${n ? n.name : nodeId} を削除しました`);
-      freeRender();
+      freeRevalidateAndRender();
       freePopulateSelects();
       return;
     }
@@ -776,6 +1192,12 @@
         return;
       }
       const nodeA = Free.topo.nodes.get(a), nodeB = Free.topo.nodes.get(b);
+      if ((nodeA.type === 'router' && freeLinkCountForNode(a) >= 2) ||
+          (nodeB.type === 'router' && freeLinkCountForNode(b) >= 2)) {
+        freeLog('fail', 'ルーターは最大2本までしか接続できません（接続を中止しました）');
+        freeRender();
+        return;
+      }
       const routable = nodeA.type === 'router' || nodeB.type === 'router';
       openCostModal({
         title: '新しいリンク',
@@ -785,9 +1207,16 @@
         initialDown: false,
         onSave: (cost, down) => {
           const id = uid('fl');
-          Free.topo.links.push({ id, a, b, cost: routable ? cost : 0, down, routable });
+          const link = { id, a, b, cost: routable ? cost : 0, down, routable };
+          Free.topo.links.push(link);
+          [nodeA, nodeB].forEach((node) => {
+            if (node.type === 'router') {
+              Free.ifaceCounter += 1;
+              node.ifaces[id] = { ip: `10.90.${Free.ifaceCounter}.1`, mask: '/30' };
+            }
+          });
           freeLog('sys', `${nodeA.name} — ${nodeB.name} を接続しました`);
-          freeRender();
+          freeRevalidateAndRender();
         }
       });
     }
@@ -797,9 +1226,10 @@
     const link = Free.topo.links.find((l) => l.id === linkId);
     if (!link) return;
     if (Free.interactionMode === 'delete') {
+      freeRemoveLinkIfaces(link);
       Free.topo.links = Free.topo.links.filter((l) => l.id !== linkId);
       freeLog('sys', 'リンクを削除しました');
-      freeRender();
+      freeRevalidateAndRender();
       return;
     }
     const nodeA = Free.topo.nodes.get(link.a), nodeB = Free.topo.nodes.get(link.b);
@@ -824,8 +1254,12 @@
     const statusEl = document.getElementById('free-send-status');
     if (!srcId || !dstId) { statusEl.textContent = '送信元・宛先のPCを配置してください。'; return; }
     if (srcId === dstId) { statusEl.textContent = '送信元と宛先が同じです。'; return; }
+    if (freeHasAnyError()) { statusEl.textContent = 'IPアドレス設定にエラーがあるため送信できません。'; return; }
     statusEl.textContent = '送信中…';
     simulateSend(Free.topo, srcId, dstId, freeLog, Free.svg, {
+      onRouteComputed: (result) => {
+        if (result.reachable) startFlow(Free, Free.topo, result.path, freeRender);
+      },
       onFinish: (result) => { statusEl.textContent = result.reachable ? '送信完了' : '送信失敗（不通）'; }
     });
   }
@@ -842,8 +1276,11 @@
   function initFreeMode() {
     Free.svg = document.getElementById('free-svg');
     Free.logEl = document.getElementById('free-log');
+    Free.logBadge = document.getElementById('free-log-badge');
+    freeValidate();
     freeRender();
     freePopulateSelects();
+    freeUpdateSendButtonState();
 
     document.querySelectorAll('#panel-free [data-add]').forEach((btn) => {
       btn.addEventListener('click', () => freeAddNode(btn.dataset.add));
@@ -855,12 +1292,20 @@
       Free.topo.nodes.clear();
       Free.topo.links = [];
       Free.typeCounters = { pc: 0, switch: 0, router: 0 };
-      freeRender();
+      Free.flows = [];
+      Free.ifaceCounter = 0;
+      Free.nodeErrors = new Map();
+      closeIpPopover();
+      freeRevalidateAndRender();
       freePopulateSelects();
       freeLog('sys', 'すべて消去しました');
     });
     document.getElementById('free-send-btn').addEventListener('click', freeSend);
-    document.getElementById('free-clear-log').addEventListener('click', () => { Free.logEl.innerHTML = ''; });
+    document.getElementById('free-clear-log').addEventListener('click', () => {
+      Free.logEl.innerHTML = '';
+      Free.logBadge.hidden = true;
+      Free.logBadge.textContent = '0';
+    });
 
     // クリック（ノード／リンク）
     Free.svg.addEventListener('click', (e) => {
@@ -869,6 +1314,15 @@
       if (nodeTarget) { freeHandleNodeClick(nodeTarget.dataset.nodeId); return; }
       const linkTarget = e.target.closest('[data-link-id]');
       if (linkTarget) { freeHandleLinkClick(linkTarget.dataset.linkId); return; }
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!Free.openPopoverNodeId) return;
+      const popover = document.getElementById('ip-popover');
+      if (popover.contains(e.target)) return;
+      if (e.target.closest('[data-node-id]')) return;
+      closeIpPopover();
+      freeRender();
     });
 
     Free.svg.addEventListener('mousemove', (e) => {
@@ -897,6 +1351,7 @@
       node.y = clamp(p.y + Free.dragging.offY, 30, 530);
       Free.dragging.moved = true;
       freeRender();
+      if (Free.openPopoverNodeId === node.id) positionIpPopover(node);
     });
     window.addEventListener('mouseup', () => {
       if (Free.dragging) setTimeout(() => { Free.dragging = null; }, 0);
@@ -917,6 +1372,7 @@
 
     function activate(which) {
       const isFixed = which === 'fixed';
+      if (isFixed && typeof closeIpPopover === 'function') closeIpPopover();
       tabFixed.classList.toggle('is-active', isFixed);
       tabFree.classList.toggle('is-active', !isFixed);
       tabFixed.setAttribute('aria-selected', String(isFixed));
