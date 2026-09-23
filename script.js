@@ -196,6 +196,33 @@
     return topology.nodes.get(path[path.length - 1]);
   }
 
+  // 指定したIPアドレスを持つルーターノードを探す（トップレベルip、またはインタフェースip）
+  function findRouterByIp(topology, ip) {
+    let found = null;
+    topology.nodes.forEach((n) => {
+      if (found || n.type !== 'router') return;
+      if (n.ip === ip) { found = n; return; }
+      if (n.ifaces) {
+        Object.values(n.ifaces).forEach((iface) => { if (iface.ip === ip) found = n; });
+      }
+    });
+    return found;
+  }
+
+  // 「PC → デフォルトゲートウェイ」を固定、「ゲートウェイ → 宛先」を都度計算する2段階の経路計算
+  function computeGatewayRoute(topology, srcId, dstId) {
+    const src = topology.nodes.get(srcId);
+    if (!src || !src.gateway) return { reachable: false, path: [], cost: Infinity, error: 'no-gateway' };
+    const gwNode = findRouterByIp(topology, src.gateway);
+    if (!gwNode) return { reachable: false, path: [], cost: Infinity, error: 'gateway-unreachable' };
+    const leg1 = dijkstra(topology, srcId, gwNode.id);
+    if (!leg1.reachable) return { reachable: false, path: [], cost: Infinity, error: 'gateway-unreachable' };
+    if (gwNode.id === dstId) return { reachable: true, path: leg1.path, cost: leg1.cost };
+    const leg2 = dijkstra(topology, gwNode.id, dstId);
+    if (!leg2.reachable) return { reachable: false, path: leg1.path, cost: Infinity, error: 'dest-unreachable' };
+    return { reachable: true, path: leg1.path.concat(leg2.path.slice(1)), cost: leg1.cost + leg2.cost };
+  }
+
   // ルーターごとのルーティングテーブルを算出（宛先ネットワーク・ネクストホップ・メトリック）
   function computeRoutingTable(topology, routerId, segments) {
     const linkCount = topology.links.filter((l) => l.a === routerId || l.b === routerId).length;
@@ -250,17 +277,20 @@
     const nodes = new Map();
     const links = [];
 
-    function addNode(id, type, name, ip, mac, x, y) {
-      nodes.set(id, { id, type, name, ip: ip || null, mac: mac || null, x, y });
+    function addNode(id, type, name, ip, mac, x, y, extra) {
+      const node = { id, type, name, ip: ip || null, mac: mac || null, x, y };
+      Object.assign(node, extra || {});
+      if (type === 'router') node.ifaces = {};
+      nodes.set(id, node);
     }
     function addLink(id, a, b, cost, routable) {
-      links.push({ id, a, b, cost: cost || 0, down: false, routable: !!routable });
+      links.push({ id, a, b, cost: cost || 0, baseCost: cost || 0, load: 0, down: false, routable: !!routable });
     }
 
-    // 送信側 PC
-    addNode('pc-s1', 'pc', 'PC-S1', '192.168.1.11', randMac(0x11), 70, 120);
-    addNode('pc-s2', 'pc', 'PC-S2', '192.168.1.12', randMac(0x12), 70, 280);
-    addNode('pc-s3', 'pc', 'PC-S3', '192.168.1.13', randMac(0x13), 70, 440);
+    // 送信側 PC（デフォルトゲートウェイ = RT-S）
+    addNode('pc-s1', 'pc', 'PC-S1', '192.168.1.11', randMac(0x11), 70, 120, { mask: '/24', gateway: '192.168.1.1' });
+    addNode('pc-s2', 'pc', 'PC-S2', '192.168.1.12', randMac(0x12), 70, 280, { mask: '/24', gateway: '192.168.1.1' });
+    addNode('pc-s3', 'pc', 'PC-S3', '192.168.1.13', randMac(0x13), 70, 440, { mask: '/24', gateway: '192.168.1.1' });
     addNode('sw-s', 'switch', 'SW-S', null, randMac(0x20), 230, 280);
     addNode('rt-s', 'router', 'RT-S', '192.168.1.1', randMac(0x30), 380, 280);
 
@@ -269,12 +299,12 @@
     addNode('rt-b', 'router', 'RT-B', null, randMac(0x42), 590, 280);
     addNode('rt-c', 'router', 'RT-C', null, randMac(0x43), 590, 450);
 
-    // 受信側
+    // 受信側（デフォルトゲートウェイ = RT-R）
     addNode('rt-r', 'router', 'RT-R', '192.168.2.1', randMac(0x50), 800, 280);
     addNode('sw-r', 'switch', 'SW-R', null, randMac(0x60), 950, 280);
-    addNode('pc-r1', 'pc', 'PC-R1', '192.168.2.11', randMac(0x71), 1060, 120);
-    addNode('pc-r2', 'pc', 'PC-R2', '192.168.2.12', randMac(0x72), 1060, 280);
-    addNode('pc-r3', 'pc', 'PC-R3', '192.168.2.13', randMac(0x73), 1060, 440);
+    addNode('pc-r1', 'pc', 'PC-R1', '192.168.2.11', randMac(0x71), 1060, 120, { mask: '/24', gateway: '192.168.2.1' });
+    addNode('pc-r2', 'pc', 'PC-R2', '192.168.2.12', randMac(0x72), 1060, 280, { mask: '/24', gateway: '192.168.2.1' });
+    addNode('pc-r3', 'pc', 'PC-R3', '192.168.2.13', randMac(0x73), 1060, 440, { mask: '/24', gateway: '192.168.2.1' });
 
     addLink(uid('l'), 'pc-s1', 'sw-s', 0, false);
     addLink(uid('l'), 'pc-s2', 'sw-s', 0, false);
@@ -293,7 +323,22 @@
     addLink(uid('l'), 'sw-r', 'pc-r2', 0, false);
     addLink(uid('l'), 'sw-r', 'pc-r3', 0, false);
 
-    return { nodes, links };
+    // 中継リンクの各ルーターインタフェースにIPアドレスを割り当てる（両端は同じサブネット）
+    const topo = { nodes, links };
+    const ifaceSubnets = {
+      'rt-s_rt-a': '10.1.1', 'rt-a_rt-r': '10.1.2',
+      'rt-s_rt-b': '10.1.3', 'rt-b_rt-r': '10.1.4',
+      'rt-s_rt-c': '10.1.5', 'rt-c_rt-r': '10.1.6'
+    };
+    Object.keys(ifaceSubnets).forEach((linkId) => {
+      const link = links.find((l) => l.id === linkId);
+      const net = ifaceSubnets[linkId];
+      const nodeA = nodes.get(link.a), nodeB = nodes.get(link.b);
+      nodeA.ifaces[linkId] = { ip: `${net}.1`, mask: '/30' };
+      nodeB.ifaces[linkId] = { ip: `${net}.2`, mask: '/30' };
+    });
+
+    return topo;
   }
 
   const ROUTE_DEFS = [
@@ -321,9 +366,13 @@
   const MESH_DEFAULT_COST = 3;
 
   function addMeshLinks(topo) {
-    MESH_LINK_DEFS.forEach((md) => {
+    MESH_LINK_DEFS.forEach((md, idx) => {
       if (topo.links.some((l) => l.id === md.id)) return;
-      topo.links.push({ id: md.id, a: md.a, b: md.b, cost: MESH_DEFAULT_COST, down: false, routable: true, mesh: true });
+      topo.links.push({ id: md.id, a: md.a, b: md.b, cost: MESH_DEFAULT_COST, baseCost: MESH_DEFAULT_COST, load: 0, down: false, routable: true, mesh: true });
+      const nodeA = topo.nodes.get(md.a), nodeB = topo.nodes.get(md.b);
+      const net = `10.1.${7 + idx}`;
+      if (nodeA && nodeA.ifaces) nodeA.ifaces[md.id] = { ip: `${net}.1`, mask: '/30' };
+      if (nodeB && nodeB.ifaces) nodeB.ifaces[md.id] = { ip: `${net}.2`, mask: '/30' };
     });
   }
 
@@ -331,6 +380,9 @@
     MESH_LINK_DEFS.forEach((md) => {
       const l = topo.links.find((x) => x.id === md.id);
       if (l && l._recoveryTimer) { clearTimeout(l._recoveryTimer); l._recoveryTimer = null; }
+      const nodeA = topo.nodes.get(md.a), nodeB = topo.nodes.get(md.b);
+      if (nodeA && nodeA.ifaces) delete nodeA.ifaces[md.id];
+      if (nodeB && nodeB.ifaces) delete nodeB.ifaces[md.id];
     });
     topo.links = topo.links.filter((l) => !l.mesh);
   }
@@ -513,7 +565,7 @@
         const x1 = pts.x1 + px * offset, y1 = pts.y1 + py * offset;
         const x2 = pts.x2 + px * offset, y2 = pts.y2 + py * offset;
         const state = e.flow.state;
-        const cls = 'flow-line ' + (state === 'flowing' ? 'is-flowing' : (state === 'failed' ? 'is-failed' : 'is-done'));
+        const cls = 'flow-line ' + (state === 'flowing' ? 'is-flowing' : (state === 'lost' ? 'is-failed' : 'is-done'));
         const style = state === 'flowing' ? ` style="animation-duration:${dashDur}s"` : '';
         html += `<line class="${cls}" stroke="${e.flow.color}"${style} x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}"></line>`;
       });
@@ -556,11 +608,12 @@
     return c;
   }
 
-  /* ---- 送信フロー・エンジン（リアルタイム経路再評価つき） ---- */
+  /* ---- 送信フロー・エンジン ---- */
 
   const HOP_BASE_MS = 700;
-  const MAX_REROUTES = 5;
   const FLOW_DASH_BASE_SEC = 0.55;
+  const INITIAL_TTL = 8;
+  const LINK_LOAD_PER_USE = 2;
 
   function startFlow(store, topology, path, rerender, logFn) {
     if (!path || path.length < 2) return null;
@@ -571,7 +624,7 @@
       path: path.slice(),
       currentIndex: 0,
       state: 'flowing',
-      rerouteCount: 0,
+      ttl: INITIAL_TTL,
       segmentFrom: null,
       segmentTo: null,
       segmentStartedAt: null,
@@ -590,12 +643,35 @@
     return flow;
   }
 
+  function markLinkUsed(topology, fromId, toId) {
+    const link = findLinkBetween(topology, fromId, toId);
+    if (link && link.routable) {
+      link.load = (link.load || 0) + LINK_LOAD_PER_USE;
+      recalcLinkCost(link);
+    }
+  }
+
+  function loseFlow(flow, atNodeId, reasonMsg) {
+    flow.state = 'lost';
+    flow.doneAt = Date.now();
+    const n = flow.topology.nodes.get(atNodeId);
+    if (flow.logFn) flow.logFn('fail', `${n ? n.name : atNodeId} 付近でパケットが失われました（${reasonMsg}）`);
+    flow.rerender();
+    if (flow.onResolved) flow.onResolved('lost');
+  }
+
   function advanceFlowSegment(flow) {
     if (flow.state !== 'flowing') return;
     const fromId = flow.path[flow.currentIndex];
     const toId = flow.path[flow.currentIndex + 1];
+    const fromNode = flow.topology.nodes.get(fromId);
+    // ルーターを通過する時点でTTLを消費する（PC・スイッチでは消費しない）
+    if (fromNode && fromNode.type === 'router' && flow.currentIndex > 0) {
+      flow.ttl -= 1;
+      if (flow.ttl <= 0) { loseFlow(flow, fromId, 'TTL超過'); return; }
+    }
     const link = findLinkBetween(flow.topology, fromId, toId);
-    if (link && link.down) { rerouteFlow(flow, fromId); return; }
+    if (link && link.down) { loseFlow(flow, fromId, 'リンク障害'); return; }
     const hopMs = HOP_BASE_MS / (flow.store.speedFactor || 1);
     flow.segmentFrom = fromId;
     flow.segmentTo = toId;
@@ -609,6 +685,7 @@
 
   function onSegmentComplete(flow) {
     if (flow.state !== 'flowing') return;
+    markLinkUsed(flow.topology, flow.segmentFrom, flow.segmentTo);
     flow.currentIndex++;
     if (flow.currentIndex >= flow.path.length - 1) {
       flow.state = 'done';
@@ -621,31 +698,33 @@
     advanceFlowSegment(flow);
   }
 
-  function rerouteFlow(flow, fromId) {
-    const topology = flow.topology;
-    const fromNode = topology.nodes.get(fromId);
-    flow.rerouteCount++;
-    if (flow.rerouteCount > MAX_REROUTES) {
-      flow.state = 'failed';
-      flow.doneAt = Date.now();
-      if (flow.logFn) flow.logFn('fail', `${fromNode ? fromNode.name : fromId} 付近で経路が途絶えました。送信失敗（不通・迂回回数の上限に達しました）`);
-      flow.rerender();
-      if (flow.onResolved) flow.onResolved('failed');
-      return;
+  // 送信1回分（最大5回まで自動再送を試みる「セッション」）
+  function startDeliverySession(store, topology, srcId, dstId, rerender, logFn, onSettled) {
+    let attempt = 0;
+    const MAX_ATTEMPTS = 5;
+    function tryAttempt() {
+      attempt++;
+      const route = computeGatewayRoute(topology, srcId, dstId);
+      if (!route.reachable) {
+        const src = topology.nodes.get(srcId);
+        logFn('fail', `${src ? src.name : srcId}: 経路を計算できません（${route.error === 'no-gateway' ? 'デフォルトゲートウェイ未設定' : '宛先まで到達不可'}）`);
+        if (onSettled) onSettled('failed');
+        return;
+      }
+      const flow = startFlow(store, topology, route.path, rerender, logFn);
+      if (!flow) { if (onSettled) onSettled('failed'); return; }
+      flow.onResolved = (state) => {
+        if (state === 'done') { if (onSettled) onSettled('done'); return; }
+        if (attempt >= MAX_ATTEMPTS) {
+          logFn('fail', `送信失敗：${attempt}回再送を試みましたが到達できませんでした`);
+          if (onSettled) onSettled('failed');
+          return;
+        }
+        logFn('sys', `約1秒後に再送します（${attempt}/${MAX_ATTEMPTS}回目）`);
+        setTimeout(tryAttempt, 1000);
+      };
     }
-    const result = dijkstra(topology, fromId, flow.dstId);
-    if (!result.reachable) {
-      flow.state = 'failed';
-      flow.doneAt = Date.now();
-      if (flow.logFn) flow.logFn('fail', `${fromNode ? fromNode.name : fromId} 付近で経路が途絶えました。送信失敗（不通・迂回できる経路がありません）`);
-      flow.rerender();
-      if (flow.onResolved) flow.onResolved('failed');
-      return;
-    }
-    const history = flow.path.slice(0, flow.currentIndex + 1);
-    flow.path = history.concat(result.path.slice(1));
-    if (flow.logFn) flow.logFn('route', `${fromNode ? fromNode.name : fromId}: 障害を検知、迂回先を再計算 → 新しい経路（コスト${result.cost}）に変更`);
-    advanceFlowSegment(flow);
+    tryAttempt();
   }
 
   // 速度スライダー変更時：進行中の区間を、現在の進捗位置から新しい速度で再スケジュールする
@@ -669,9 +748,16 @@
   /* ---- 時間経過によるコスト自動変動／自動障害（共通） ---- */
 
   const DRIFT_INTERVAL_MS = 3000;
-  const DRIFT_DELTAS = [-2, -1, 1, 2];
+  const LOAD_DECAY_PER_TICK = 1;
   const AUTO_RECOVER_MIN_MS = 3000;
   const AUTO_RECOVER_MAX_MS = 6000;
+
+  // link.baseCost（編集された基準値）＋link.load（利用による負荷）から実効コストを再計算する
+  function recalcLinkCost(link) {
+    const base = link.baseCost != null ? link.baseCost : link.cost;
+    link.load = Math.max(0, link.load || 0);
+    link.cost = clamp(base + link.load, base, 10);
+  }
 
   // リンクのUP/DOWNはこの関数を通して変更する（自動復帰タイマーの管理を一元化するため）
   function setLinkDownState(store, topology, link, downValue, logFn, rerender) {
@@ -709,7 +795,7 @@
   function driftTick(topology, store, logFn, rerender) {
     const routableLinks = topology.links.filter((l) => l.routable);
     routableLinks.forEach((link) => {
-      if (link.down) return; // ダウン中はコスト変動を一時停止
+      if (link.down) return; // ダウン中は変動を一時停止
       const failRoll = Math.random() * 100;
       if (failRoll < store.driftFailRate) {
         setLinkDownState(store, topology, link, true, logFn, rerender);
@@ -718,10 +804,10 @@
         logFn('fail', `【時間経過】${label} でリンク障害が発生しました${store.autoRecoverEnabled ? '（自動復帰します）' : '（手動で復旧してください）'}`);
         return;
       }
-      const delta = DRIFT_DELTAS[Math.floor(Math.random() * DRIFT_DELTAS.length)];
-      const newCost = clamp(link.cost + delta, 1, 10);
-      if (newCost !== link.cost) {
-        link.cost = newCost;
+      // 利用状況（負荷）による自然減衰：3秒ごとに-1、基準値まで下がる
+      if ((link.load || 0) > 0) {
+        link.load = Math.max(0, link.load - LOAD_DECAY_PER_TICK);
+        recalcLinkCost(link);
       }
     });
   }
@@ -776,7 +862,7 @@
     const dst = topology.nodes.get(dstId);
     if (!src || !dst) return;
 
-    const result = dijkstra(topology, srcId, dstId);
+    const result = computeGatewayRoute(topology, srcId, dstId);
     let t = 0;
     const STEP = 260;
 
@@ -784,7 +870,10 @@
 
     if (!result.reachable) {
       if (opts.onRouteComputed) opts.onRouteComputed(result);
-      logFn('fail', '到達可能な経路がありません（経路上の全リンクが障害中です）', t);
+      const msg = result.error === 'no-gateway' ? 'デフォルトゲートウェイが設定されていません'
+        : result.error === 'gateway-unreachable' ? 'デフォルトゲートウェイに到達できません'
+        : '到達可能な経路がありません（経路上の全リンクが障害中です）';
+      logFn('fail', msg, t);
       if (opts.onFinish) setTimeout(() => opts.onFinish(result), t + 200);
       return;
     }
@@ -792,8 +881,6 @@
     if (opts.onRouteComputed) opts.onRouteComputed(result);
 
     // 送信直後（ARP解決あたり）に自動障害を抽選。3経路すべてのリンクが対象。
-    // ここで当たったリンクが今回の経路に影響する場合でも、即座に失敗とはせず、
-    // 実際のアニメーション（フロー）側がリアルタイムに検知して迂回を試みる。
     if (opts.failRate) {
       const upRoutable = topology.links.filter((l) => l.routable && !l.down);
       if (upRoutable.length && Math.random() * 100 < opts.failRate) {
@@ -807,9 +894,9 @@
       }
     }
 
-    const gw = firstL3Hop(topology, result.path);
+    const gw = findRouterByIp(topology, src.gateway) || firstL3Hop(topology, result.path);
 
-    logFn('arp', `${src.name}: ARP要求（ブロードキャスト）— ${gw.ip || gw.name} のMACアドレスは？`, t); t += STEP;
+    logFn('arp', `${src.name}: ARP要求（ブロードキャスト）— デフォルトゲートウェイ ${gw.ip || src.gateway} のMACアドレスは？`, t); t += STEP;
     logFn('arp', `${gw.name}: ARP応答 — MACアドレス ${gw.mac} を通知`, t); t += STEP;
 
     const sport = randPort();
@@ -818,14 +905,14 @@
     logFn('tcp', `${src.name} → ${dst.name} : TCP ACK (ack=1) — コネクション確立`, t); t += STEP;
 
     logFn('tcp', `TCPセグメント生成: sport=${sport} dport=80 flags=PSH,ACK`, t); t += STEP;
-    logFn('ip', `IPパケット生成: src=${src.ip || '-'} dst=${dst.ip || '-'} TTL=64 proto=TCP`, t); t += STEP;
+    logFn('ip', `IPパケット生成: src=${src.ip || '-'} dst=${dst.ip || '-'} TTL=${INITIAL_TTL} proto=TCP`, t); t += STEP;
     logFn('frame', `イーサネットフレーム生成: src=${src.mac} dst=${gw.mac} (type=0x0800)`, t); t += STEP;
 
     if (opts.routeLabel) {
       logFn('route', `経路選択: ${opts.routeLabel}（合計コスト ${result.cost}）を採用`, t); t += STEP;
     }
 
-    let ttl = 64;
+    let ttl = INITIAL_TTL;
     for (let i = 1; i < result.path.length - 1; i++) {
       const n = topology.nodes.get(result.path[i]);
       if (n.type === 'router') {
@@ -835,6 +922,11 @@
         const metricNote = link && link.routable ? ` (metric ${link.cost})` : '';
         logFn('route', `${n.name}: 宛先 ${dst.ip || dst.name} への経路検索 → ネクストホップ ${nextNode.name}${metricNote}、TTL=${ttl}`, t); t += STEP;
         logFn('frame', `${n.name}: フレーム再構築 src=${n.mac} dst=${nextNode.mac}`, t); t += STEP;
+        if (ttl <= 0) {
+          logFn('fail', `${n.name}: TTLが0になったためパケットを破棄しました`, t); t += STEP;
+          if (opts.onFinish) setTimeout(() => opts.onFinish({ reachable: false, path: [], cost: Infinity }), t + 200);
+          return;
+        }
       } else if (n.type === 'switch') {
         logFn('sys', `${n.name}: MACアドレステーブル参照 → 該当ポートへフォワード`, t); t += STEP;
       }
@@ -866,21 +958,43 @@
     autoRecoverEnabled: false,
     speedFactor: 1,
     meshEnabled: false,
-    lastChosenPath: null
+    lastChosenPath: null,
+    nodeErrors: new Map()
   };
+
+  function fixedValidate() {
+    Fixed.nodeErrors = validateTopologyIps(Fixed.topo);
+  }
+
+  function fixedHasAnyError() {
+    let any = false;
+    Fixed.nodeErrors.forEach((v) => { if (v.hasError) any = true; });
+    return any;
+  }
 
   function fixedLog(level, msg, delay) {
     makeLogger(Fixed.logEl, Fixed.logBadge)(level, msg, delay);
   }
 
   function fixedRender() {
-    renderTopology(Fixed.svg, Fixed.topo, { hoverNodeId: Fixed.hoverNodeId, flows: Fixed.flows, speedFactor: Fixed.speedFactor });
+    renderTopology(Fixed.svg, Fixed.topo, {
+      hoverNodeId: Fixed.hoverNodeId,
+      flows: Fixed.flows,
+      speedFactor: Fixed.speedFactor,
+      errorNodeIds: new Set(Array.from(Fixed.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
+    });
     fixedRenderRouteCompare(Fixed.lastChosenPath);
     fixedRenderRoutingTable();
+    fixedUpdateSendButtonState();
     if (Fixed.openPopoverNodeId) {
       const n = Fixed.topo.nodes.get(Fixed.openPopoverNodeId);
       if (n) renderFixedRtPopoverContent(n); else closeFixedRtPopover();
     }
+  }
+
+  function fixedUpdateSendButtonState() {
+    const btn = document.getElementById('send-btn');
+    if (btn) btn.disabled = fixedHasAnyError();
   }
 
   function fixedRenderRouteCompare(chosenFullPath) {
@@ -951,7 +1065,7 @@
         const link = Fixed.topo.links.find((l) => l.id === linkId);
         rows += `<tr>
           <td>${label}</td>
-          <td><input type="number" min="1" max="99" value="${link.cost}" data-link-id="${link.id}" class="rt-cost-input" ${manual ? '' : 'disabled'}></td>
+          <td><input type="number" min="1" max="99" value="${link.baseCost}" data-link-id="${link.id}" class="rt-cost-input" ${manual ? '' : 'disabled'}></td>
           <td><button class="btn btn-mini rt-toggle" data-link-id="${link.id}">${link.down ? '<span class="rt-down">DOWN</span>' : 'UP'}</button></td>
         </tr>`;
       });
@@ -971,7 +1085,7 @@
         if (!link) return;
         meshRows += `<tr>
           <td>${md.label}</td>
-          <td><input type="number" min="1" max="99" value="${link.cost}" data-link-id="${link.id}" class="rt-cost-input" ${manual ? '' : 'disabled'}></td>
+          <td><input type="number" min="1" max="99" value="${link.baseCost}" data-link-id="${link.id}" class="rt-cost-input" ${manual ? '' : 'disabled'}></td>
           <td><button class="btn btn-mini rt-toggle" data-link-id="${link.id}">${link.down ? '<span class="rt-down">DOWN</span>' : 'UP'}</button></td>
         </tr>`;
       });
@@ -987,7 +1101,8 @@
       inp.addEventListener('change', () => {
         const link = Fixed.topo.links.find((l) => l.id === inp.dataset.linkId);
         const v = clamp(parseInt(inp.value, 10) || 1, 1, 99);
-        link.cost = v;
+        link.baseCost = v;
+        recalcLinkCost(link);
         fixedRender();
       });
     });
@@ -1030,11 +1145,12 @@
     openCostModal({
       title: 'リンク設定',
       subtitle: `${link.a.toUpperCase()} — ${link.b.toUpperCase()}`,
-      initialCost: link.cost,
+      initialCost: link.baseCost != null ? link.baseCost : link.cost,
       costEditable: true,
       initialDown: link.down,
       onSave: (cost, down) => {
-        link.cost = cost;
+        link.baseCost = cost;
+        recalcLinkCost(link);
         setLinkDownState(Fixed, Fixed.topo, link, down, fixedLog, fixedRender);
         fixedLog('sys', `${link.id.toUpperCase()} を更新しました（コスト=${cost}, 状態=${down ? 'DOWN' : 'UP'}）`);
         fixedRender();
@@ -1063,8 +1179,43 @@
 
   function renderFixedRtPopoverContent(node) {
     const pop = document.getElementById('fixed-rt-popover');
-    pop.innerHTML = `<div class="ip-popover-title"><span>${node.name} のルーティングテーブル</span><button type="button" class="ip-popover-close" id="fixed-rt-popover-close">×</button></div>
+    const errRec = Fixed.nodeErrors.get(node.id) || { self: {}, ifaces: {} };
+
+    let ipSection = '<div class="popover-section-title">IPアドレス設定</div>';
+    if (node.ip) {
+      // RT-S / RT-R のPC側インタフェースは固定（編集不可）
+      ipSection += popoverIfaceBlockHtml('PC側インタフェース', node.ip, '/24', null, 'top', false);
+    }
+    const linkIds = Object.keys(node.ifaces || {});
+    ipSection += linkIds.map((linkId) => {
+      const link = Fixed.topo.links.find((l) => l.id === linkId);
+      const otherId = link ? (link.a === node.id ? link.b : link.a) : null;
+      const other = otherId ? Fixed.topo.nodes.get(otherId) : null;
+      const label = `→ ${other ? other.name : '?'} 側`;
+      const iface = node.ifaces[linkId];
+      return popoverIfaceBlockHtml(label, iface.ip, iface.mask, errRec.ifaces[linkId], linkId, true);
+    }).join('');
+
+    pop.innerHTML = `<div class="ip-popover-title"><span>${node.name} の設定</span><button type="button" class="ip-popover-close" id="fixed-rt-popover-close">×</button></div>
+      ${ipSection}
+      <div class="popover-section-title">ルーティングテーブル</div>
       ${fixedRoutingTableHtml(node)}`;
+
+    pop.querySelectorAll('.ip-field, .mask-input').forEach((input) => {
+      input.addEventListener('input', () => {
+        const key = input.dataset.key, field = input.dataset.field;
+        if (!node.ifaces[key]) node.ifaces[key] = { ip: '', mask: '' };
+        if (field === 'ip') node.ifaces[key].ip = input.value; else node.ifaces[key].mask = input.value;
+        fixedValidate();
+        renderTopology(Fixed.svg, Fixed.topo, {
+          hoverNodeId: Fixed.hoverNodeId,
+          flows: Fixed.flows,
+          speedFactor: Fixed.speedFactor,
+          errorNodeIds: new Set(Array.from(Fixed.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
+        });
+        fixedUpdateSendButtonState();
+      });
+    });
     document.getElementById('fixed-rt-popover-close').addEventListener('click', closeFixedRtPopover);
   }
 
@@ -1108,6 +1259,10 @@
       statusEl.textContent = '送信元と宛先が同じです。別のPCを選択してください。';
       return;
     }
+    if (fixedHasAnyError()) {
+      statusEl.textContent = 'IPアドレス設定にエラーがあるため送信できません。';
+      return;
+    }
     statusEl.textContent = '送信中…';
 
     const sendOpts = {
@@ -1134,12 +1289,9 @@
     fixedRenderRouteCompare(Fixed.lastChosenPath);
 
     if (result.reachable) {
-      const flow = startFlow(Fixed, Fixed.topo, result.path, fixedRender, fixedLog);
-      if (flow && statusEl) {
-        flow.onResolved = (state) => {
-          statusEl.textContent = state === 'done' ? '送信完了' : '送信失敗（不通）';
-        };
-      }
+      startDeliverySession(Fixed, Fixed.topo, result.path[0], result.path[result.path.length - 1], fixedRender, fixedLog, (state) => {
+        if (statusEl) statusEl.textContent = state === 'done' ? '送信完了' : '送信失敗（不通）';
+      });
     } else {
       if (statusEl) statusEl.textContent = '送信失敗（不通）';
       fixedRender();
@@ -1151,6 +1303,7 @@
     Fixed.logEl = document.getElementById('log');
     Fixed.logBadge = document.getElementById('log-badge');
     fixedPopulateSelects();
+    fixedValidate();
     fixedRender();
 
     Fixed.svg.addEventListener('click', (e) => {
@@ -1199,7 +1352,7 @@
       if (Fixed.rtMode === 'preset') {
         Object.keys(PRESET_COSTS).forEach((linkId) => {
           const link = Fixed.topo.links.find((l) => l.id === linkId);
-          if (link) link.cost = PRESET_COSTS[linkId];
+          if (link) { link.baseCost = PRESET_COSTS[linkId]; link.load = 0; recalcLinkCost(link); }
         });
         fixedLog('sys', 'プリセットのルーティングテーブルを読み込みました');
       } else {
@@ -1265,6 +1418,7 @@
         removeMeshLinks(Fixed.topo);
         fixedLog('sys', 'メッシュ接続を無効にしました（RT-A—RT-B, RT-B—RT-Cは経路計算・表示から除外されます）');
       }
+      fixedValidate();
       fixedRender();
     });
 
@@ -1402,13 +1556,25 @@
     target[kind] = true;
   }
 
-  function freeValidate() {
-    const errorMap = new Map();
-    Free.topo.nodes.forEach((n) => { errorMap.set(n.id, { hasError: false, self: {}, ifaces: {} }); });
+  // ネットワークアドレス／ブロードキャストアドレスをホストIPとして使っていないか判定
+  function isReservedHostAddress(ip, mask) {
+    const ipInt = parseIp(ip);
+    const prefix = parseMaskToPrefix(mask);
+    if (ipInt === null || prefix === null) return false;
+    if (prefix >= 31) return false; // /31, /32はホスト部の特例のため対象外
+    const maskBits = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+    const hostBits = (~maskBits) >>> 0;
+    const hostPart = (ipInt & hostBits) >>> 0;
+    return hostPart === 0 || hostPart === hostBits;
+  }
 
-    // 1) 書式チェック + 2) 重複チェック 用にエントリを収集
+  // 任意のトポロジ（固定／自由配置どちらも）に対してIP設定を検証する共通ロジック
+  function validateTopologyIps(topo) {
+    const errorMap = new Map();
+    topo.nodes.forEach((n) => { errorMap.set(n.id, { hasError: false, self: {}, ifaces: {} }); });
+
     const entries = [];
-    Free.topo.nodes.forEach((n) => {
+    topo.nodes.forEach((n) => {
       if (n.type === 'pc') {
         entries.push({ ip: n.ip, mask: n.mask, ownerNodeId: n.id, ifaceKey: null });
       } else if (n.type === 'router') {
@@ -1421,7 +1587,8 @@
 
     entries.forEach((e) => {
       e.formatOk = isValidIpFormat(e.ip) && isValidMaskFormat(e.mask);
-      if (!e.formatOk) freeMarkError(errorMap, e, 'format');
+      if (!e.formatOk) { freeMarkError(errorMap, e, 'format'); }
+      else if (isReservedHostAddress(e.ip, e.mask)) { freeMarkError(errorMap, e, 'reserved'); }
     });
 
     const byIp = new Map();
@@ -1435,8 +1602,8 @@
       if (list.length > 1) list.forEach((e) => freeMarkError(errorMap, e, 'dup'));
     });
 
-    // 3) サブネット整合性チェック（スイッチのみ経由 = 同一サブネット）
-    const uf = freeBuildClusters(Free.topo);
+    // サブネット整合性チェック（同一リンクの両端は必ず同じサブネット）
+    const uf = freeBuildClusters(topo);
     const clusters = new Map();
     uf.keys().forEach((key) => {
       const root = uf.find(key);
@@ -1445,7 +1612,7 @@
     });
     clusters.forEach((keys) => {
       const resolved = keys
-        .map((k) => ({ key: k, entry: freeResolveEntry(Free.topo, k) }))
+        .map((k) => ({ key: k, entry: freeResolveEntry(topo, k) }))
         .filter((r) => r.entry && isValidIpFormat(r.entry.ip) && isValidMaskFormat(r.entry.mask));
       if (resolved.length < 2) return;
       const tally = new Map();
@@ -1461,7 +1628,34 @@
       });
     });
 
-    Free.nodeErrors = errorMap;
+    // デフォルトゲートウェイの検証（PCのみ）：未設定／書式不正／実在しないインタフェース／別セグメント
+    topo.nodes.forEach((n) => {
+      if (n.type !== 'pc') return;
+      const rec = errorMap.get(n.id);
+      const gw = n.gateway;
+      if (!gw) { rec.hasError = true; rec.gateway = { missing: true }; return; }
+      if (!isValidIpFormat(gw)) { rec.hasError = true; rec.gateway = { format: true }; return; }
+      let matchedTopLevel = false, matchedIfaceKey = null;
+      topo.nodes.forEach((rn) => {
+        if (rn.type !== 'router') return;
+        if (rn.ip === gw) matchedTopLevel = true;
+        if (rn.ifaces) {
+          Object.keys(rn.ifaces).forEach((linkId) => {
+            if (rn.ifaces[linkId].ip === gw) matchedIfaceKey = `${rn.id}::${linkId}`;
+          });
+        }
+      });
+      if (!matchedTopLevel && !matchedIfaceKey) { rec.hasError = true; rec.gateway = { unreachable: true }; return; }
+      if (matchedIfaceKey && uf.find(matchedIfaceKey) !== uf.find(n.id)) {
+        rec.hasError = true; rec.gateway = { subnet: true };
+      }
+    });
+
+    return errorMap;
+  }
+
+  function freeValidate() {
+    Free.nodeErrors = validateTopologyIps(Free.topo);
   }
 
   function freeHasAnyError() {
@@ -1509,34 +1703,70 @@
     pop.style.top = top + 'px';
   }
 
+  // IPポップオーバー共通ヘルパー（固定トポロジ・自由配置の両方で使用）
+  function popoverFieldErrorText(errObj) {
+    if (!errObj) return '';
+    if (errObj.format) return '書式が正しくありません（例: 192.168.1.1 と /24 または 255.255.255.0）';
+    if (errObj.reserved) return 'ネットワークアドレス／ブロードキャストアドレスはホストIPに使用できません';
+    if (errObj.dup) return 'このIPアドレスは他のノードと重複しています';
+    if (errObj.subnet) return '接続関係から見てサブネットが不整合です';
+    return '';
+  }
+
+  function popoverIfaceBlockHtml(label, ip, mask, errObj, dataKey, editable) {
+    const hasErr = errObj && (errObj.format || errObj.reserved || errObj.dup || errObj.subnet);
+    if (!editable) {
+      return `<div class="iface-block">
+        <div class="iface-label">${label}（固定）</div>
+        <div class="iface-row"><span class="iface-fixed-value">${ip || ''} ${mask || ''}</span></div>
+      </div>`;
+    }
+    return `<div class="iface-block">
+      <div class="iface-label">${label}</div>
+      <div class="iface-row">
+        <input type="text" class="ip-field ${hasErr ? 'has-error' : ''}" data-key="${dataKey}" data-field="ip" value="${ip || ''}" placeholder="192.168.1.1">
+        <input type="text" class="mask-input ${hasErr ? 'has-error' : ''}" data-key="${dataKey}" data-field="mask" value="${mask || ''}" placeholder="/24">
+      </div>
+      <div class="iface-error-msg">${popoverFieldErrorText(errObj)}</div>
+    </div>`;
+  }
+
+  function gatewayFieldErrorText(errObj) {
+    if (!errObj) return '';
+    if (errObj.missing) return 'デフォルトゲートウェイが未設定です';
+    if (errObj.format) return 'IPアドレスの書式が正しくありません';
+    if (errObj.unreachable) return 'そのIPを持つルーターのインタフェースが存在しません';
+    if (errObj.subnet) return 'このPCと同じセグメント内のルーターではありません';
+    return '';
+  }
+
+  function popoverGatewayBlockHtml(gateway, errObj, editable) {
+    if (!editable) {
+      return `<div class="iface-block">
+        <div class="iface-label">デフォルトゲートウェイ（固定）</div>
+        <div class="iface-row"><span class="iface-fixed-value">${gateway || ''}</span></div>
+      </div>`;
+    }
+    const hasErr = !!errObj;
+    return `<div class="iface-block">
+      <div class="iface-label">デフォルトゲートウェイ</div>
+      <div class="iface-row">
+        <input type="text" class="ip-field gateway-field ${hasErr ? 'has-error' : ''}" data-key="gateway" data-field="gateway" value="${gateway || ''}" placeholder="192.168.1.1">
+      </div>
+      <div class="iface-error-msg">${gatewayFieldErrorText(errObj)}</div>
+    </div>`;
+  }
+
   function renderIpPopoverContent(node) {
     const pop = document.getElementById('ip-popover');
     if (!node) return;
     const errRec = Free.nodeErrors.get(node.id) || { self: {}, ifaces: {} };
 
-    function fieldErrorText(errObj) {
-      if (!errObj) return '';
-      if (errObj.format) return '書式が正しくありません（例: 192.168.1.1 と /24 または 255.255.255.0）';
-      if (errObj.dup) return 'このIPアドレスは他のノードと重複しています';
-      if (errObj.subnet) return '接続関係から見てサブネットが不整合です';
-      return '';
-    }
-
-    function ifaceBlockHtml(label, ip, mask, errObj, dataKey) {
-      const hasErr = errObj && (errObj.format || errObj.dup || errObj.subnet);
-      return `<div class="iface-block">
-        <div class="iface-label">${label}</div>
-        <div class="iface-row">
-          <input type="text" class="ip-field ${errObj && errObj.format ? 'has-error' : (hasErr ? 'has-error' : '')}" data-key="${dataKey}" data-field="ip" value="${ip || ''}" placeholder="192.168.1.1">
-          <input type="text" class="mask-input ${hasErr ? 'has-error' : ''}" data-key="${dataKey}" data-field="mask" value="${mask || ''}" placeholder="/24">
-        </div>
-        <div class="iface-error-msg">${fieldErrorText(errObj)}</div>
-      </div>`;
-    }
-
     let body = '';
     if (node.type === 'pc') {
-      body = `<div class="popover-section-title">IPアドレス設定</div>` + ifaceBlockHtml('IPアドレス／マスク', node.ip, node.mask, errRec.self, 'self');
+      body = `<div class="popover-section-title">IPアドレス設定</div>` +
+        popoverIfaceBlockHtml('IPアドレス／マスク', node.ip, node.mask, errRec.self, 'self', true) +
+        popoverGatewayBlockHtml(node.gateway, errRec.gateway, true);
     } else if (node.type === 'router') {
       const linkIds = Object.keys(node.ifaces || {});
       if (linkIds.length === 0) {
@@ -1548,7 +1778,7 @@
           const other = otherId ? Free.topo.nodes.get(otherId) : null;
           const label = `→ ${other ? other.name : '?'} 側`;
           const iface = node.ifaces[linkId];
-          return ifaceBlockHtml(label, iface.ip, iface.mask, errRec.ifaces[linkId], linkId);
+          return popoverIfaceBlockHtml(label, iface.ip, iface.mask, errRec.ifaces[linkId], linkId, true);
         }).join('');
       }
       const segments = freeNetworkSegments();
@@ -1576,7 +1806,9 @@
       input.addEventListener('focus', () => { freePushUndo(); });
       input.addEventListener('input', () => {
         const key = input.dataset.key, field = input.dataset.field;
-        if (node.type === 'pc') {
+        if (field === 'gateway') {
+          node.gateway = input.value;
+        } else if (node.type === 'pc') {
           if (field === 'ip') node.ip = input.value; else node.mask = input.value;
         } else if (node.type === 'router') {
           if (!node.ifaces[key]) node.ifaces[key] = { ip: '', mask: '' };
@@ -1596,15 +1828,11 @@
     const errRec = Free.nodeErrors.get(node.id) || { self: {}, ifaces: {} };
     pop.querySelectorAll('.ip-field, .mask-input').forEach((input) => {
       const key = input.dataset.key;
-      const errObj = key === 'self' ? errRec.self : errRec.ifaces[key];
-      const hasErr = errObj && (errObj.format || errObj.dup || errObj.subnet);
+      const errObj = key === 'gateway' ? errRec.gateway : (key === 'self' ? errRec.self : errRec.ifaces[key]);
+      const hasErr = key === 'gateway' ? !!errObj : (errObj && (errObj.format || errObj.reserved || errObj.dup || errObj.subnet));
       input.classList.toggle('has-error', !!hasErr);
       const msgEl = input.closest('.iface-block').querySelector('.iface-error-msg');
-      if (msgEl) {
-        msgEl.textContent = errObj && errObj.format ? '書式が正しくありません（例: 192.168.1.1 と /24 または 255.255.255.0）'
-          : errObj && errObj.dup ? 'このIPアドレスは他のノードと重複しています'
-          : errObj && errObj.subnet ? '接続関係から見てサブネットが不整合です' : '';
-      }
+      if (msgEl) msgEl.textContent = key === 'gateway' ? gatewayFieldErrorText(errObj) : popoverFieldErrorText(errObj);
     });
   }
 
@@ -1695,6 +1923,7 @@
     if (type === 'pc') {
       node.ip = `10.20.0.${n}`;
       node.mask = '/24';
+      node.gateway = '';
     } else if (type === 'router') {
       node.ifaces = {}; // linkId -> {ip, mask}
     }
@@ -1865,7 +2094,7 @@
         onSave: (cost, down) => {
           freePushUndo();
           const id = uid('fl');
-          const link = { id, a, b, cost: routable ? cost : 0, down, routable };
+          const link = { id, a, b, cost: routable ? cost : 0, baseCost: routable ? cost : 0, load: 0, down, routable };
           Free.topo.links.push(link);
           if (nodeA.type === 'router' && nodeB.type === 'router') {
             // ルーター同士は新しい共通サブネットを生成し、両端を同じサブネットにする
@@ -1900,12 +2129,12 @@
     openCostModal({
       title: 'リンク設定',
       subtitle: `${nodeA.name} — ${nodeB.name}`,
-      initialCost: link.cost,
+      initialCost: link.baseCost != null ? link.baseCost : link.cost,
       costEditable: link.routable,
       initialDown: link.down,
       onSave: (cost, down) => {
         freePushUndo();
-        if (link.routable) link.cost = cost;
+        if (link.routable) { link.baseCost = cost; recalcLinkCost(link); }
         setLinkDownState(Free, Free.topo, link, down, freeLog, freeRender);
         freeLog('sys', `${nodeA.name} — ${nodeB.name} を更新しました`);
         freeRender();
@@ -1927,12 +2156,9 @@
       onLinkDown: () => freeRender(),
       onRouteComputed: (result) => {
         if (result.reachable) {
-          const flow = startFlow(Free, Free.topo, result.path, freeRender, freeLog);
-          if (flow) {
-            flow.onResolved = (state) => {
-              statusEl.textContent = state === 'done' ? '送信完了' : '送信失敗（不通）';
-            };
-          }
+          startDeliverySession(Free, Free.topo, srcId, dstId, freeRender, freeLog, (state) => {
+            statusEl.textContent = state === 'done' ? '送信完了' : '送信失敗（不通）';
+          });
         } else {
           statusEl.textContent = '送信失敗（不通）';
         }

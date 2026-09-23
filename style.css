@@ -327,6 +327,16 @@ input[type="range"]{
   margin-bottom: 4px;
 }
 .iface-row{ display:flex; gap:6px; }
+.iface-fixed-value{
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-s);
+  padding: 6px 7px;
+  flex: 1;
+}
 .iface-row input{
   flex:1;
   min-width: 0;
