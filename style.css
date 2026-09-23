@@ -32,6 +32,31 @@
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Consolas, monospace;
 }
 
+body.theme-light{
+  --bg:            #f3f5f7;
+  --bg-grid:       #eaedf1;
+  --panel:         #ffffff;
+  --panel-alt:     #f4f6f8;
+  --panel-raised:  #eef1f4;
+  --border:        #d7dee5;
+  --border-soft:   #e3e8ed;
+  --text:          #1d2733;
+  --text-dim:      #5c6b7d;
+  --text-faint:    #8695a7;
+
+  --accent:        #0f9c8c;
+  --accent-dim:    #bfe9e2;
+  --accent-glow:   rgba(15,156,140,.2);
+
+  --signal:        #c17a1b;
+  --signal-dim:    #f2ddb8;
+
+  --danger:        #c23f34;
+  --danger-dim:    #f6d7d3;
+
+  --ok:            #2f9d5c;
+}
+
 *{ box-sizing: border-box; }
 
 html,body{
@@ -498,12 +523,19 @@ input[type="range"]{
   stroke-width: 3;
   filter: drop-shadow(0 0 5px rgba(201,154,224,.7));
 }
+.rv-node-flash.is-arrival{
+  filter: drop-shadow(0 0 5px rgba(127,209,247,.7));
+}
 
 /* node error indicator */
 .n-box.has-error{ stroke: var(--danger) !important; stroke-width: 2; }
-.n-error-badge{ pointer-events:none; }
+.n-error-badge{ pointer-events:none; animation: error-badge-blink 1s ease-in-out infinite; }
 .n-error-badge circle{ fill: var(--danger); stroke: var(--panel); stroke-width: 2; }
-.n-error-badge text{ fill:#fff; font-size: 11px; font-weight:700; text-anchor:middle; font-family: var(--font-ui); }
+.n-error-badge text{ fill:#fff; font-size: 14px; font-weight:700; text-anchor:middle; font-family: var(--font-ui); }
+@keyframes error-badge-blink{
+  0%, 100%{ opacity: 1; }
+  50%{ opacity: .35; }
+}
 
 /* free mode nodes */
 .free-node{ cursor: grab; }

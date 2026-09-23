@@ -701,7 +701,7 @@
         ${nodeIconMarkup(n.type)}
         <text class="n-label" y="${size.h / 2 + 15}">${n.name}</text>
         ${n.ip ? `<text class="n-sub" y="${size.h / 2 + 27}">${formatIpMask(n.ip, n.mask)}</text>` : ''}
-        ${hasError ? `<g class="n-error-badge" transform="translate(${size.w / 2 - 4},${-size.h / 2 + 4})"><circle r="8"></circle><text y="4">!</text></g>` : ''}
+        ${hasError ? `<g class="n-error-badge" transform="translate(${size.w / 2 - 2},${-size.h / 2 + 2})"><circle r="11"></circle><text y="5">!</text></g>` : ''}
       </g>`;
     });
 
@@ -780,15 +780,19 @@
   /* ---- トリガード・アップデートの「合図」パルス（データ送信の色付きラインとは別の演出） ---- */
 
   const PULSE_COLOR = '#c99ae0';
+  const ARRIVAL_COLOR = '#7fd1f7';
   const PULSE_DURATION_MS = 1500;
   const PERIODIC_PULSE_MAX_CHANGES = 5; // 1回の定期交換でこれ以上の変化があればパルスは間引く（ログは出す）
+  const COMET_TAIL_STEPS = [0, 0.05, 0.1, 0.15]; // 彗星の尾（本体からの遅延オフセット）
 
   function spawnPulse(store, fromId, toId, variant) {
     const pulse = { id: uid('pulse'), fromId, toId, variant: variant || 'triggered', createdAt: Date.now() };
     store.pulses.push(pulse);
     setTimeout(() => {
       store.pulses = store.pulses.filter((p) => p.id !== pulse.id);
-    }, PULSE_DURATION_MS + 100);
+      // 到着フラッシュ（送信元の色とは別の色で、受け取った側に表示）
+      spawnNodeFlash(store, toId, 'arrival', variant);
+    }, PULSE_DURATION_MS + 200);
   }
 
   function renderPulses(topology, pulses) {
@@ -813,6 +817,16 @@
       html += `<line class="rv-pulse-trail${isPeriodic ? ' is-periodic' : ''}" x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="${PULSE_COLOR}">
         <animate attributeName="opacity" values="0;${trailOpacity};${trailOpacity};0" keyTimes="0;0.1;0.8;1" dur="${dur}s" fill="freeze"></animate>
       </line>`;
+      // 彗星の尾：本体の少し後ろを追従する、だんだん小さく・薄くなる粒
+      COMET_TAIL_STEPS.forEach((delay, idx) => {
+        if (idx === 0) return; // idx=0は本体（下で描画）
+        const tr = Math.max(1.5, r - idx * 2);
+        const tOpacity = dotPeakOpacity * (1 - idx * 0.25);
+        html += `<circle r="${tr}" fill="${PULSE_COLOR}" opacity="0">
+          <animateMotion dur="${dur}s" path="M ${ax} ${ay} L ${bx} ${by}" begin="${delay}s" fill="freeze" repeatCount="1"></animateMotion>
+          <animate attributeName="opacity" values="0;${tOpacity};${tOpacity};0" keyTimes="0;0.08;0.8;1" begin="${delay}s" dur="${dur}s" fill="freeze"></animate>
+        </circle>`;
+      });
       // 先頭を移動する光の粒（同じくずらした位置を移動、定期交換は小さく・薄く）
       html += `<g class="rv-pulse${isPeriodic ? ' is-periodic' : ''}">
         <circle r="${r}" fill="${PULSE_COLOR}">
@@ -824,9 +838,11 @@
     return html;
   }
 
-  // 自分自身のルーティングテーブルが変化したこと自体を示す「フラッシュ」（隣への伝播がなくても必ず出る）
-  function spawnNodeFlash(store, nodeId) {
-    const flash = { id: uid('flash'), nodeId, createdAt: Date.now() };
+  // ルーティングテーブルが変化したことを示す「フラッシュ」。
+  // kind='source'：自分自身が経路情報を破棄した合図（隣への伝播がなくても必ず出る）
+  // kind='arrival'：パルスが実際に届いた合図（送信元とは別の色）
+  function spawnNodeFlash(store, nodeId, kind, variant) {
+    const flash = { id: uid('flash'), nodeId, kind: kind || 'source', variant: variant || 'triggered', createdAt: Date.now() };
     store.nodeFlashes.push(flash);
     setTimeout(() => {
       store.nodeFlashes = store.nodeFlashes.filter((f) => f.id !== flash.id);
@@ -840,9 +856,14 @@
     flashes.forEach((f) => {
       const n = topology.nodes.get(f.nodeId);
       if (!n) return;
-      html += `<circle class="rv-node-flash" cx="${n.x}" cy="${n.y}" r="12" fill="none" stroke="${PULSE_COLOR}">
-        <animate attributeName="r" values="12;40" dur="${dur}s" fill="freeze"></animate>
-        <animate attributeName="opacity" values="0.9;0" dur="${dur}s" fill="freeze"></animate>
+      const isArrival = f.kind === 'arrival';
+      const isPeriodic = f.variant === 'periodic';
+      const color = isArrival ? ARRIVAL_COLOR : PULSE_COLOR;
+      const maxR = isPeriodic ? 26 : 40;
+      const peakOpacity = isPeriodic ? 0.5 : 0.9;
+      html += `<circle class="rv-node-flash${isArrival ? ' is-arrival' : ''}" cx="${n.x}" cy="${n.y}" r="12" fill="none" stroke="${color}">
+        <animate attributeName="r" values="12;${maxR}" dur="${dur}s" fill="freeze"></animate>
+        <animate attributeName="opacity" values="${peakOpacity};0" dur="${dur}s" fill="freeze"></animate>
       </circle>`;
     });
     return html;
@@ -2669,8 +2690,17 @@
     tabFree.addEventListener('click', () => activate('free'));
   }
 
+  function initThemeToggle() {
+    const toggle = document.getElementById('theme-toggle');
+    if (!toggle) return;
+    toggle.addEventListener('change', (e) => {
+      document.body.classList.toggle('theme-light', e.target.checked);
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
     initTabs();
+    initThemeToggle();
     initModal();
     initFixedMode();
     initFreeMode();
