@@ -802,14 +802,21 @@
       const r = isPeriodic ? 5 : 8;
       const trailOpacity = isPeriodic ? 0.3 : 0.6;
       const dotPeakOpacity = isPeriodic ? 0.55 : 1;
-      // 接続線自体が一瞬光る「尾」（定期交換は控えめ）
-      html += `<line class="rv-pulse-trail${isPeriodic ? ' is-periodic' : ''}" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${PULSE_COLOR}">
+      // リンク本体・コスト表示・送信中のラインとぴったり重ならないよう、垂直方向にずらす
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const px = -dy / len, py = dx / len;
+      const offset = 14;
+      const ax = a.x + px * offset, ay = a.y + py * offset;
+      const bx = b.x + px * offset, by = b.y + py * offset;
+      // 接続線からずらした位置に「尾」を表示（定期交換は控えめ）
+      html += `<line class="rv-pulse-trail${isPeriodic ? ' is-periodic' : ''}" x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="${PULSE_COLOR}">
         <animate attributeName="opacity" values="0;${trailOpacity};${trailOpacity};0" keyTimes="0;0.1;0.8;1" dur="${dur}s" fill="freeze"></animate>
       </line>`;
-      // 先頭を移動する光の粒（定期交換は小さく・薄く）
+      // 先頭を移動する光の粒（同じくずらした位置を移動、定期交換は小さく・薄く）
       html += `<g class="rv-pulse${isPeriodic ? ' is-periodic' : ''}">
         <circle r="${r}" fill="${PULSE_COLOR}">
-          <animateMotion dur="${dur}s" path="M ${a.x} ${a.y} L ${b.x} ${b.y}" fill="freeze" repeatCount="1"></animateMotion>
+          <animateMotion dur="${dur}s" path="M ${ax} ${ay} L ${bx} ${by}" fill="freeze" repeatCount="1"></animateMotion>
           <animate attributeName="opacity" values="0;${dotPeakOpacity};${dotPeakOpacity};0" keyTimes="0;0.08;0.85;1" dur="${dur}s" fill="freeze"></animate>
         </circle>
       </g>`;
