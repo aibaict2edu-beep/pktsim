@@ -409,7 +409,12 @@
     store.rvTimer = setInterval(() => {
       const segments = computeNetworkSegments(topo);
       const changes = rvExchangeTick(topo, segments);
-      if (store.showPeriodicLog && changes.length && logFn) rvLogChanges(topo, segments, changes, logFn);
+      if (store.showPeriodicLog && changes.length) {
+        if (logFn) rvLogChanges(topo, segments, changes, logFn);
+        if (changes.length < PERIODIC_PULSE_MAX_CHANGES) {
+          changes.forEach((c) => spawnPulse(store, c.fromId, c.toId, 'periodic'));
+        }
+      }
       if (rerender) rerender();
     }, RV_INTERVAL_MS);
   }
@@ -776,9 +781,10 @@
 
   const PULSE_COLOR = '#c99ae0';
   const PULSE_DURATION_MS = 1500;
+  const PERIODIC_PULSE_MAX_CHANGES = 5; // 1回の定期交換でこれ以上の変化があればパルスは間引く（ログは出す）
 
-  function spawnPulse(store, fromId, toId) {
-    const pulse = { id: uid('pulse'), fromId, toId, createdAt: Date.now() };
+  function spawnPulse(store, fromId, toId, variant) {
+    const pulse = { id: uid('pulse'), fromId, toId, variant: variant || 'triggered', createdAt: Date.now() };
     store.pulses.push(pulse);
     setTimeout(() => {
       store.pulses = store.pulses.filter((p) => p.id !== pulse.id);
@@ -792,15 +798,19 @@
     pulses.forEach((p) => {
       const a = topology.nodes.get(p.fromId), b = topology.nodes.get(p.toId);
       if (!a || !b) return;
-      // 接続線自体が一瞬光る「尾」
-      html += `<line class="rv-pulse-trail" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${PULSE_COLOR}">
-        <animate attributeName="opacity" values="0;0.6;0.6;0" keyTimes="0;0.1;0.8;1" dur="${dur}s" fill="freeze"></animate>
+      const isPeriodic = p.variant === 'periodic';
+      const r = isPeriodic ? 5 : 8;
+      const trailOpacity = isPeriodic ? 0.3 : 0.6;
+      const dotPeakOpacity = isPeriodic ? 0.55 : 1;
+      // 接続線自体が一瞬光る「尾」（定期交換は控えめ）
+      html += `<line class="rv-pulse-trail${isPeriodic ? ' is-periodic' : ''}" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${PULSE_COLOR}">
+        <animate attributeName="opacity" values="0;${trailOpacity};${trailOpacity};0" keyTimes="0;0.1;0.8;1" dur="${dur}s" fill="freeze"></animate>
       </line>`;
-      // 先頭を移動する光の粒
-      html += `<g class="rv-pulse">
-        <circle r="8" fill="${PULSE_COLOR}">
+      // 先頭を移動する光の粒（定期交換は小さく・薄く）
+      html += `<g class="rv-pulse${isPeriodic ? ' is-periodic' : ''}">
+        <circle r="${r}" fill="${PULSE_COLOR}">
           <animateMotion dur="${dur}s" path="M ${a.x} ${a.y} L ${b.x} ${b.y}" fill="freeze" repeatCount="1"></animateMotion>
-          <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.85;1" dur="${dur}s" fill="freeze"></animate>
+          <animate attributeName="opacity" values="0;${dotPeakOpacity};${dotPeakOpacity};0" keyTimes="0;0.08;0.85;1" dur="${dur}s" fill="freeze"></animate>
         </circle>
       </g>`;
     });
