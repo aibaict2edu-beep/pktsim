@@ -236,6 +236,8 @@
       if (!entry) { rows.push({ network: seg.label, nextHop: '—', metric: '未学習', type: 'unreachable' }); return; }
       if (entry.nextHop === null) {
         rows.push({ network: seg.label, nextHop: '直結', metric: entry.cost, type: 'connected' });
+      } else if (entry.cost >= RV_INFINITY) {
+        rows.push({ network: seg.label, nextHop: '—', metric: '不通', type: 'unreachable' });
       } else {
         const nextHopNode = topology.nodes.get(entry.nextHop);
         rows.push({ network: seg.label, nextHop: nextHopNode ? nextHopNode.name : '?', metric: entry.cost, type: 'remote' });
@@ -368,8 +370,8 @@
           const shouldAccept = !existing || advertised < existing.cost || existing.nextHop === n.id;
           if (!shouldAccept) return;
           if (advertised >= RV_INFINITY) {
-            if (existing && existing.nextHop === n.id) {
-              delete nbTable[segId];
+            if (existing && existing.nextHop === n.id && existing.cost < RV_INFINITY) {
+              nbTable[segId] = { cost: RV_INFINITY, nextHop: n.id };
               changes.push({ fromId: n.id, toId: nb.id, segId, type: 'remove' });
             }
           } else {
@@ -877,6 +879,10 @@
       loseFlow(flow, currentId, '宛先への経路情報が未学習');
       return;
     }
+    if (entry.cost >= RV_INFINITY) {
+      loseFlow(flow, currentId, '自分のルーティングテーブルでは宛先が不通と判断');
+      return;
+    }
     if (flow.logFn) {
       const desc = entry.nextHop === null ? '直結' : (topology.nodes.get(entry.nextHop) ? topology.nodes.get(entry.nextHop).name : '?');
       flow.logFn('route', `${currentNode.name}: 自分のルーティングテーブルを参照 → 宛先まで残りコスト${entry.cost}、ネクストホップ ${desc}`);
@@ -1005,14 +1011,20 @@
   }
 
   // リンクのUP/DOWNはこの関数を通して変更する（自動復帰タイマーの管理を一元化するため）
-  // リンクが落ちたとき、その先（ネクストホップ）を経由していた自分の経路情報を破棄する
-  // （実機のルーターは自分のインタフェースが落ちたことは即座にわかるため）
+  // リンクが落ちたとき、その先（ネクストホップ）を経由していた自分の経路情報を「到達不能」として
+  // 隣に積極的に知らせられるようにする（ルートポイズニング）。単に削除するだけだと、
+  // それを黙って忘れるだけになり、隣のルーターへ「もう届かない」と伝える手段がなくなってしまうため。
   function rvInvalidateThroughNeighbor(topo, routerId, neighborId) {
     const router = topo.nodes.get(routerId);
-    if (!router || !router.rtVector) return;
+    if (!router || !router.rtVector) return [];
+    const affected = [];
     Object.keys(router.rtVector).forEach((segId) => {
-      if (router.rtVector[segId].nextHop === neighborId) delete router.rtVector[segId];
+      if (router.rtVector[segId].nextHop === neighborId && router.rtVector[segId].cost < RV_INFINITY) {
+        router.rtVector[segId] = { cost: RV_INFINITY, nextHop: neighborId };
+        affected.push(segId);
+      }
     });
+    return affected;
   }
 
   function setLinkDownState(store, topology, link, downValue, logFn, rerender) {
@@ -1020,8 +1032,20 @@
       link.down = true;
       if (store.autoRecoverEnabled) scheduleAutoRecover(store, topology, link, logFn, rerender);
       if (link.routable) {
-        rvInvalidateThroughNeighbor(topology, link.a, link.b);
-        rvInvalidateThroughNeighbor(topology, link.b, link.a);
+        const segments = computeNetworkSegments(topology);
+        const affectedA = rvInvalidateThroughNeighbor(topology, link.a, link.b);
+        const affectedB = rvInvalidateThroughNeighbor(topology, link.b, link.a);
+        if (logFn && (affectedA.length || affectedB.length)) {
+          const na = topology.nodes.get(link.a), nb = topology.nodes.get(link.b);
+          affectedA.forEach((segId) => {
+            const seg = segments.find((s) => s.repId === segId);
+            logFn('fail', `${na ? na.name : link.a}: ${nb ? nb.name : link.b}経由だった宛先 ${seg ? seg.label : segId} を到達不能として記録`);
+          });
+          affectedB.forEach((segId) => {
+            const seg = segments.find((s) => s.repId === segId);
+            logFn('fail', `${nb ? nb.name : link.b}: ${na ? na.name : link.a}経由だった宛先 ${seg ? seg.label : segId} を到達不能として記録`);
+          });
+        }
         rvTriggerUpdate(topology, store, logFn, rerender); // トリガード・アップデート：即座に隣へ伝播
       }
     } else if (!downValue && link.down) {
