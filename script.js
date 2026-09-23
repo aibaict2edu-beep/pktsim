@@ -703,6 +703,7 @@
     // 転送中パケットのアイコン（フローラインの一番上に表示）
     html += renderPacketIcons(topology, state.flows);
     html += renderPulses(topology, state.pulses);
+    html += renderNodeFlashes(topology, state.nodeFlashes);
 
     svgEl.innerHTML = html;
   }
@@ -774,7 +775,7 @@
   /* ---- トリガード・アップデートの「合図」パルス（データ送信の色付きラインとは別の演出） ---- */
 
   const PULSE_COLOR = '#c99ae0';
-  const PULSE_DURATION_MS = 650;
+  const PULSE_DURATION_MS = 1500;
 
   function spawnPulse(store, fromId, toId) {
     const pulse = { id: uid('pulse'), fromId, toId, createdAt: Date.now() };
@@ -787,16 +788,45 @@
   function renderPulses(topology, pulses) {
     if (!pulses || !pulses.length) return '';
     let html = '';
+    const dur = (PULSE_DURATION_MS / 1000).toFixed(2);
     pulses.forEach((p) => {
       const a = topology.nodes.get(p.fromId), b = topology.nodes.get(p.toId);
       if (!a || !b) return;
-      const dur = (PULSE_DURATION_MS / 1000).toFixed(2);
+      // 接続線自体が一瞬光る「尾」
+      html += `<line class="rv-pulse-trail" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${PULSE_COLOR}">
+        <animate attributeName="opacity" values="0;0.6;0.6;0" keyTimes="0;0.1;0.8;1" dur="${dur}s" fill="freeze"></animate>
+      </line>`;
+      // 先頭を移動する光の粒
       html += `<g class="rv-pulse">
-        <circle r="5" fill="${PULSE_COLOR}">
+        <circle r="8" fill="${PULSE_COLOR}">
           <animateMotion dur="${dur}s" path="M ${a.x} ${a.y} L ${b.x} ${b.y}" fill="freeze" repeatCount="1"></animateMotion>
-          <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.75;1" dur="${dur}s" fill="freeze"></animate>
+          <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.85;1" dur="${dur}s" fill="freeze"></animate>
         </circle>
       </g>`;
+    });
+    return html;
+  }
+
+  // 自分自身のルーティングテーブルが変化したこと自体を示す「フラッシュ」（隣への伝播がなくても必ず出る）
+  function spawnNodeFlash(store, nodeId) {
+    const flash = { id: uid('flash'), nodeId, createdAt: Date.now() };
+    store.nodeFlashes.push(flash);
+    setTimeout(() => {
+      store.nodeFlashes = store.nodeFlashes.filter((f) => f.id !== flash.id);
+    }, PULSE_DURATION_MS + 100);
+  }
+
+  function renderNodeFlashes(topology, flashes) {
+    if (!flashes || !flashes.length) return '';
+    let html = '';
+    const dur = (PULSE_DURATION_MS / 1000).toFixed(2);
+    flashes.forEach((f) => {
+      const n = topology.nodes.get(f.nodeId);
+      if (!n) return;
+      html += `<circle class="rv-node-flash" cx="${n.x}" cy="${n.y}" r="12" fill="none" stroke="${PULSE_COLOR}">
+        <animate attributeName="r" values="12;40" dur="${dur}s" fill="freeze"></animate>
+        <animate attributeName="opacity" values="0.9;0" dur="${dur}s" fill="freeze"></animate>
+      </circle>`;
     });
     return html;
   }
@@ -1046,6 +1076,8 @@
             logFn('fail', `${nb ? nb.name : link.b}: ${na ? na.name : link.a}経由だった宛先 ${seg ? seg.label : segId} を到達不能として記録`);
           });
         }
+        if (affectedA.length) spawnNodeFlash(store, link.a);
+        if (affectedB.length) spawnNodeFlash(store, link.b);
         rvTriggerUpdate(topology, store, logFn, rerender); // トリガード・アップデート：即座に隣へ伝播
       }
     } else if (!downValue && link.down) {
@@ -1224,6 +1256,7 @@
     coldStart: false,
     rvTimer: null,
     pulses: [],
+    nodeFlashes: [],
     showPeriodicLog: false
   };
 
@@ -1246,6 +1279,7 @@
       hoverNodeId: Fixed.hoverNodeId,
       flows: Fixed.flows,
       pulses: Fixed.pulses,
+      nodeFlashes: Fixed.nodeFlashes,
       speedFactor: Fixed.speedFactor,
       errorNodeIds: new Set(Array.from(Fixed.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
     });
@@ -1760,6 +1794,7 @@
     coldStart: false,
     rvTimer: null,
     pulses: [],
+    nodeFlashes: [],
     showPeriodicLog: false
   };
 
@@ -2196,6 +2231,7 @@
       selectedNodeId: Free.linkFirstPick,
       flows: Free.flows,
       pulses: Free.pulses,
+      nodeFlashes: Free.nodeFlashes,
       speedFactor: Free.speedFactor,
       errorNodeIds: new Set(Array.from(Free.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
     });

@@ -480,6 +480,17 @@ input[type="range"]{
 .rv-pulse circle{
   filter: drop-shadow(0 0 6px rgba(201,154,224,.9));
 }
+.rv-pulse-trail{
+  stroke-width: 4;
+  stroke-linecap: round;
+  fill: none;
+  opacity: 0;
+  filter: drop-shadow(0 0 5px rgba(201,154,224,.6));
+}
+.rv-node-flash{
+  stroke-width: 3;
+  filter: drop-shadow(0 0 5px rgba(201,154,224,.7));
+}
 
 /* node error indicator */
 .n-box.has-error{ stroke: var(--danger) !important; stroke-width: 2; }
