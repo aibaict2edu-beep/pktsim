@@ -337,7 +337,8 @@
   }
 
   // 1回分の情報交換（同期的なラウンド）。直結セグメントの再確認 → 隣接ルーターへの通知、の順で行う
-  function rvExchangeTick(topo, segments, logFn) {
+  // 1回分の情報交換（同期的なラウンド）。実際にテーブルが変化した内容を changes として返す
+  function rvExchangeTick(topo, segments) {
     topo.nodes.forEach((n) => {
       if (n.type !== 'router') return;
       if (!n.rtVector) n.rtVector = {};
@@ -352,6 +353,7 @@
     const nextTables = new Map();
     topo.nodes.forEach((n) => { if (n.type === 'router') nextTables.set(n.id, Object.assign({}, n.rtVector)); });
 
+    const changes = [];
     topo.nodes.forEach((n) => {
       if (n.type !== 'router') return;
       const myTable = n.rtVector;
@@ -366,9 +368,14 @@
           const shouldAccept = !existing || advertised < existing.cost || existing.nextHop === n.id;
           if (!shouldAccept) return;
           if (advertised >= RV_INFINITY) {
-            if (existing && existing.nextHop === n.id) delete nbTable[segId];
+            if (existing && existing.nextHop === n.id) {
+              delete nbTable[segId];
+              changes.push({ fromId: n.id, toId: nb.id, segId, type: 'remove' });
+            }
           } else {
+            const changed = !existing || existing.cost !== advertised || existing.nextHop !== n.id;
             nbTable[segId] = { cost: advertised, nextHop: n.id };
+            if (changed) changes.push({ fromId: n.id, toId: nb.id, segId, type: 'update', cost: advertised });
           }
         });
       });
@@ -378,13 +385,29 @@
       if (n.type !== 'router') return;
       n.rtVector = nextTables.get(n.id);
     });
+
+    return changes;
   }
 
-  function startRvTimer(store, topo, rerender) {
+  function rvLogChanges(topo, segments, changes, logFn) {
+    changes.forEach((c) => {
+      const fromNode = topo.nodes.get(c.fromId), toNode = topo.nodes.get(c.toId);
+      const seg = segments.find((s) => s.repId === c.segId);
+      const destLabel = seg ? seg.label : c.segId;
+      if (c.type === 'remove') {
+        logFn('route', `${fromNode ? fromNode.name : c.fromId} → ${toNode ? toNode.name : c.toId}: 宛先 ${destLabel} への経路情報を削除（到達不能を通知）`);
+      } else {
+        logFn('route', `${fromNode ? fromNode.name : c.fromId} → ${toNode ? toNode.name : c.toId}: 宛先 ${destLabel} の情報を通知 → コスト${c.cost}に更新`);
+      }
+    });
+  }
+
+  function startRvTimer(store, topo, rerender, logFn) {
     stopRvTimer(store);
     store.rvTimer = setInterval(() => {
       const segments = computeNetworkSegments(topo);
-      rvExchangeTick(topo, segments);
+      const changes = rvExchangeTick(topo, segments);
+      if (store.showPeriodicLog && changes.length && logFn) rvLogChanges(topo, segments, changes, logFn);
       if (rerender) rerender();
     }, RV_INTERVAL_MS);
   }
@@ -393,10 +416,16 @@
     if (store.rvTimer) { clearInterval(store.rvTimer); store.rvTimer = null; }
   }
 
-  // リンク状態の変化を即座に隣接ルーターへ伝える（トリガード・アップデート：最初の1ホップ分のみ即時反映）
-  function rvTriggerUpdate(topo) {
+  // リンク状態の変化を即座に隣接ルーターへ伝える（トリガード・アップデート）
+  // ログは常に表示し、変化した隣接関係にはパルス（合図）を流す
+  function rvTriggerUpdate(topo, store, logFn, rerender) {
     const segments = computeNetworkSegments(topo);
-    rvExchangeTick(topo, segments);
+    const changes = rvExchangeTick(topo, segments);
+    if (logFn) rvLogChanges(topo, segments, changes, logFn);
+    if (store) {
+      changes.forEach((c) => spawnPulse(store, c.fromId, c.toId));
+      if (rerender) rerender();
+    }
   }
 
   /* ------------------------------------------------------------------ *
@@ -671,6 +700,7 @@
 
     // 転送中パケットのアイコン（フローラインの一番上に表示）
     html += renderPacketIcons(topology, state.flows);
+    html += renderPulses(topology, state.pulses);
 
     svgEl.innerHTML = html;
   }
@@ -735,6 +765,36 @@
         const n = topology.nodes.get(endId);
         if (n) html += packetIconMarkup(flow.color, null, null, n.x, n.y);
       }
+    });
+    return html;
+  }
+
+  /* ---- トリガード・アップデートの「合図」パルス（データ送信の色付きラインとは別の演出） ---- */
+
+  const PULSE_COLOR = '#c99ae0';
+  const PULSE_DURATION_MS = 650;
+
+  function spawnPulse(store, fromId, toId) {
+    const pulse = { id: uid('pulse'), fromId, toId, createdAt: Date.now() };
+    store.pulses.push(pulse);
+    setTimeout(() => {
+      store.pulses = store.pulses.filter((p) => p.id !== pulse.id);
+    }, PULSE_DURATION_MS + 100);
+  }
+
+  function renderPulses(topology, pulses) {
+    if (!pulses || !pulses.length) return '';
+    let html = '';
+    pulses.forEach((p) => {
+      const a = topology.nodes.get(p.fromId), b = topology.nodes.get(p.toId);
+      if (!a || !b) return;
+      const dur = (PULSE_DURATION_MS / 1000).toFixed(2);
+      html += `<g class="rv-pulse">
+        <circle r="5" fill="${PULSE_COLOR}">
+          <animateMotion dur="${dur}s" path="M ${a.x} ${a.y} L ${b.x} ${b.y}" fill="freeze" repeatCount="1"></animateMotion>
+          <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.15;0.75;1" dur="${dur}s" fill="freeze"></animate>
+        </circle>
+      </g>`;
     });
     return html;
   }
@@ -962,12 +1022,12 @@
       if (link.routable) {
         rvInvalidateThroughNeighbor(topology, link.a, link.b);
         rvInvalidateThroughNeighbor(topology, link.b, link.a);
-        rvTriggerUpdate(topology); // トリガード・アップデート：即座に隣へ伝播
+        rvTriggerUpdate(topology, store, logFn, rerender); // トリガード・アップデート：即座に隣へ伝播
       }
     } else if (!downValue && link.down) {
       link.down = false;
       if (link._recoveryTimer) { clearTimeout(link._recoveryTimer); link._recoveryTimer = null; }
-      if (link.routable) rvTriggerUpdate(topology);
+      if (link.routable) rvTriggerUpdate(topology, store, logFn, rerender);
     }
   }
 
@@ -1138,7 +1198,9 @@
     lastChosenPath: null,
     nodeErrors: new Map(),
     coldStart: false,
-    rvTimer: null
+    rvTimer: null,
+    pulses: [],
+    showPeriodicLog: false
   };
 
   function fixedValidate() {
@@ -1159,6 +1221,7 @@
     renderTopology(Fixed.svg, Fixed.topo, {
       hoverNodeId: Fixed.hoverNodeId,
       flows: Fixed.flows,
+      pulses: Fixed.pulses,
       speedFactor: Fixed.speedFactor,
       errorNodeIds: new Set(Array.from(Fixed.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
     });
@@ -1471,7 +1534,7 @@
     fixedPopulateSelects();
     fixedValidate();
     rvInitTables(Fixed.topo, computeNetworkSegments(Fixed.topo), Fixed.coldStart);
-    startRvTimer(Fixed, Fixed.topo, fixedRender);
+    startRvTimer(Fixed, Fixed.topo, fixedRender, fixedLog);
     fixedRender();
 
     Fixed.svg.addEventListener('click', (e) => {
@@ -1587,7 +1650,7 @@
         fixedLog('sys', 'メッシュ接続を無効にしました（RT-A—RT-B, RT-B—RT-Cは経路計算・表示から除外されます）');
       }
       fixedValidate();
-      rvTriggerUpdate(Fixed.topo);
+      rvTriggerUpdate(Fixed.topo, Fixed, fixedLog, fixedRender);
       fixedRender();
     });
 
@@ -1598,6 +1661,11 @@
         ? '各ルーターのテーブルを空にしました。ここから収束していく様子を観察できます'
         : '各ルーターのテーブルに直結情報を再度仕込みました');
       fixedRender();
+    });
+
+    document.getElementById('periodic-log-toggle').addEventListener('change', (e) => {
+      Fixed.showPeriodicLog = e.target.checked;
+      fixedLog('sys', Fixed.showPeriodicLog ? '定期交換ログの表示を有効にしました' : '定期交換ログの表示を停止しました');
     });
 
     fixedLog('sys', '準備完了。送信元・宛先PCを選び「パケットを送信」を押してください。');
@@ -1666,7 +1734,9 @@
     undoStack: [],
     redoStack: [],
     coldStart: false,
-    rvTimer: null
+    rvTimer: null,
+    pulses: [],
+    showPeriodicLog: false
   };
 
   function freeLog(level, msg, delay) { makeLogger(Free.logEl, Free.logBadge)(level, msg, delay); }
@@ -2101,6 +2171,7 @@
       hoverNodeId: Free.hoverNodeId,
       selectedNodeId: Free.linkFirstPick,
       flows: Free.flows,
+      pulses: Free.pulses,
       speedFactor: Free.speedFactor,
       errorNodeIds: new Set(Array.from(Free.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
     });
@@ -2339,7 +2410,7 @@
     Free.logBadge = document.getElementById('free-log-badge');
     freeValidate();
     rvInitTables(Free.topo, computeNetworkSegments(Free.topo), Free.coldStart);
-    startRvTimer(Free, Free.topo, freeRender);
+    startRvTimer(Free, Free.topo, freeRender, freeLog);
     freeRender();
     freePopulateSelects();
     freeUpdateSendButtonState();
@@ -2357,6 +2428,10 @@
         ? '各ルーターのテーブルを空にしました。ここから収束していく様子を観察できます'
         : '各ルーターのテーブルに直結情報を再度仕込みました');
       freeRender();
+    });
+    document.getElementById('free-periodic-log-toggle').addEventListener('change', (e) => {
+      Free.showPeriodicLog = e.target.checked;
+      freeLog('sys', Free.showPeriodicLog ? '定期交換ログの表示を有効にしました' : '定期交換ログの表示を停止しました');
     });
     document.getElementById('free-clear').addEventListener('click', () => {
       freePushUndo();

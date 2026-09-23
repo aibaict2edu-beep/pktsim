@@ -252,6 +252,16 @@ input[type="range"]{
 .btn-ghost{
   background: transparent;
 }
+.btn-warning{
+  background: transparent;
+  border-color: var(--signal-dim);
+  color: var(--signal);
+}
+.btn-warning:hover{
+  border-color: var(--signal);
+  color: var(--signal);
+  background: rgba(240,169,78,.08);
+}
 .btn-mini{
   padding: 4px 10px;
   font-size: 11.5px;
@@ -465,6 +475,10 @@ input[type="range"]{
 
 .pkt-icon{
   filter: drop-shadow(0 0 4px rgba(0,0,0,.5));
+}
+
+.rv-pulse circle{
+  filter: drop-shadow(0 0 6px rgba(201,154,224,.9));
 }
 
 /* node error indicator */

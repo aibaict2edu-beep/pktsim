@@ -49,6 +49,7 @@
           <input type="range" id="fail-rate" min="0" max="60" step="5" value="15">
           <output id="fail-rate-out" class="field-value">15%</output>
         </div>
+        <button class="btn btn-warning" id="reset-links">全リンク復旧</button>
         <div class="toolbar-group">
           <label class="check-label" for="drift-toggle">
             <input type="checkbox" id="drift-toggle">
@@ -81,7 +82,12 @@
             収束をゼロから見る（各ルーターのテーブルを空から収束）
           </label>
         </div>
-        <button class="btn btn-ghost" id="reset-links">全リンク復旧</button>
+        <div class="toolbar-group">
+          <label class="check-label" for="periodic-log-toggle">
+            <input type="checkbox" id="periodic-log-toggle">
+            定期交換ログの表示
+          </label>
+        </div>
       </div>
 
       <div class="stage-canvas-wrap">
@@ -176,6 +182,12 @@
           <label class="check-label" for="free-coldstart-toggle">
             <input type="checkbox" id="free-coldstart-toggle">
             収束をゼロから見る
+          </label>
+        </div>
+        <div class="toolbar-group">
+          <label class="check-label" for="free-periodic-log-toggle">
+            <input type="checkbox" id="free-periodic-log-toggle">
+            定期交換ログの表示
           </label>
         </div>
         <button class="btn btn-ghost" id="free-undo" disabled>↺ 元に戻す</button>
