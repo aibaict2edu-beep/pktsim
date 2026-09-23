@@ -945,11 +945,25 @@
   }
 
   // リンクのUP/DOWNはこの関数を通して変更する（自動復帰タイマーの管理を一元化するため）
+  // リンクが落ちたとき、その先（ネクストホップ）を経由していた自分の経路情報を破棄する
+  // （実機のルーターは自分のインタフェースが落ちたことは即座にわかるため）
+  function rvInvalidateThroughNeighbor(topo, routerId, neighborId) {
+    const router = topo.nodes.get(routerId);
+    if (!router || !router.rtVector) return;
+    Object.keys(router.rtVector).forEach((segId) => {
+      if (router.rtVector[segId].nextHop === neighborId) delete router.rtVector[segId];
+    });
+  }
+
   function setLinkDownState(store, topology, link, downValue, logFn, rerender) {
     if (downValue && !link.down) {
       link.down = true;
       if (store.autoRecoverEnabled) scheduleAutoRecover(store, topology, link, logFn, rerender);
-      if (link.routable) rvTriggerUpdate(topology); // トリガード・アップデート：即座に隣へ伝播
+      if (link.routable) {
+        rvInvalidateThroughNeighbor(topology, link.a, link.b);
+        rvInvalidateThroughNeighbor(topology, link.b, link.a);
+        rvTriggerUpdate(topology); // トリガード・アップデート：即座に隣へ伝播
+      }
     } else if (!downValue && link.down) {
       link.down = false;
       if (link._recoveryTimer) { clearTimeout(link._recoveryTimer); link._recoveryTimer = null; }
