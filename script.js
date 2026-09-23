@@ -209,7 +209,9 @@
     return found;
   }
 
-  // 「PC → デフォルトゲートウェイ」を固定、「ゲートウェイ → 宛先」を都度計算する2段階の経路計算
+  // 「PC → デフォルトゲートウェイ」を計算する（ここは固定・確定した区間）。
+  // ゲートウェイから先は、各ルーターがその時点で持つ分散ルーティングテーブルにより
+  // 1ホップずつその場で決まるため、ここでは事前には分からない。
   function computeGatewayRoute(topology, srcId, dstId) {
     const src = topology.nodes.get(srcId);
     if (!src || !src.gateway) return { reachable: false, path: [], cost: Infinity, error: 'no-gateway' };
@@ -217,50 +219,184 @@
     if (!gwNode) return { reachable: false, path: [], cost: Infinity, error: 'gateway-unreachable' };
     const leg1 = dijkstra(topology, srcId, gwNode.id);
     if (!leg1.reachable) return { reachable: false, path: [], cost: Infinity, error: 'gateway-unreachable' };
-    if (gwNode.id === dstId) return { reachable: true, path: leg1.path, cost: leg1.cost };
-    const leg2 = dijkstra(topology, gwNode.id, dstId);
-    if (!leg2.reachable) return { reachable: false, path: leg1.path, cost: Infinity, error: 'dest-unreachable' };
-    return { reachable: true, path: leg1.path.concat(leg2.path.slice(1)), cost: leg1.cost + leg2.cost };
+    return { reachable: true, path: leg1.path, cost: leg1.cost, gatewayId: gwNode.id };
   }
 
-  // ルーターごとのルーティングテーブルを算出（宛先ネットワーク・ネクストホップ・メトリック）
+  // ルーターごとのルーティングテーブルを算出（現在そのルーターが持っている情報をそのまま表示する）
   function computeRoutingTable(topology, routerId, segments) {
+    const router = topology.nodes.get(routerId);
     const linkCount = topology.links.filter((l) => l.a === routerId || l.b === routerId).length;
     if (linkCount === 0) return { rows: [], emptyNote: '経路情報なし（リンクが接続されていません）' };
 
+    const vec = (router && router.rtVector) || {};
     let rows = [];
     segments.forEach((seg) => {
       if (seg.repId === routerId) return;
-      const result = dijkstra(topology, routerId, seg.repId);
-      if (!result.reachable) {
-        rows.push({ network: seg.label, nextHop: '—', metric: '不通', type: 'unreachable' });
-        return;
-      }
-      const hasOtherRouter = result.path.slice(1, -1).some((id) => {
-        const n = topology.nodes.get(id);
-        return n && n.type === 'router';
-      });
-      if (!hasOtherRouter) {
-        rows.push({ network: seg.label, nextHop: '直結', metric: 0, type: 'connected' });
+      const entry = vec[seg.repId];
+      if (!entry) { rows.push({ network: seg.label, nextHop: '—', metric: '未学習', type: 'unreachable' }); return; }
+      if (entry.nextHop === null) {
+        rows.push({ network: seg.label, nextHop: '直結', metric: entry.cost, type: 'connected' });
       } else {
-        const nextHopNode = topology.nodes.get(result.path[1]);
-        rows.push({ network: seg.label, nextHop: nextHopNode.name, metric: result.cost, type: 'remote' });
+        const nextHopNode = topology.nodes.get(entry.nextHop);
+        rows.push({ network: seg.label, nextHop: nextHopNode ? nextHopNode.name : '?', metric: entry.cost, type: 'remote' });
       }
     });
 
     if (linkCount === 1) {
-      // リンクが1本のみ ＝ 直結ネットワークの情報しか持たない（他ルーターから経路を学習できない）
       rows = rows.filter((r) => r.type === 'connected');
       if (rows.length === 0) return { rows: [], emptyNote: '直結ネットワークの情報のみ（他ネットワークへの経路は未学習）' };
     }
-    return { rows, emptyNote: rows.length === 0 ? '経路情報なし' : null };
+    return { rows, emptyNote: rows.length === 0 ? '経路情報なし（まだ学習していません）' : null };
   }
 
-  function fixedNetworkSegments() {
-    return [
-      { label: '192.168.1.0/24（送信側PC）', repId: 'pc-s1' },
-      { label: '192.168.2.0/24（受信側PC）', repId: 'pc-r1' }
-    ];
+  // トポロジ内の「ネットワークセグメント」（switch経由でつながるPC群）を列挙する。固定・自由配置の両方で共通利用
+  function computeNetworkSegments(topo) {
+    const uf = freeBuildClusters(topo);
+    const clusters = new Map();
+    uf.keys().forEach((key) => {
+      const root = uf.find(key);
+      if (!clusters.has(root)) clusters.set(root, []);
+      clusters.get(root).push(key);
+    });
+    const segments = [];
+    clusters.forEach((keys) => {
+      const memberIds = new Set();
+      let repId = null, label = null;
+      keys.forEach((k) => {
+        if (k.includes('::')) return;
+        const n = topo.nodes.get(k);
+        if (n && n.type === 'pc') {
+          memberIds.add(k);
+          if (!repId && isValidIpFormat(n.ip) && isValidMaskFormat(n.mask)) {
+            repId = k;
+            label = networkLabelFor(n.ip, n.mask);
+          }
+        }
+      });
+      if (repId) segments.push({ label, repId, memberIds });
+    });
+    return segments;
+  }
+
+  function segmentForNode(segments, nodeId) {
+    return segments.find((s) => s.memberIds && s.memberIds.has(nodeId)) || null;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 1b. 距離ベクター型ルーティング（RIP方式）
+   * 各ルーターが自分の rtVector（宛先セグメントrepId -> {cost, nextHop}）を保持し、
+   * 隣接ルーターとのみ定期的に情報交換して収束していく。
+   * ------------------------------------------------------------------ */
+
+  const RV_INFINITY = 50;
+  const RV_INTERVAL_MS = 2500;
+
+  // routerIdから他のルーターを跨がずに（スイッチ経由のみで）segRepIdへ到達できるか
+  function rvIsDirectlyConnected(topo, routerId, segRepId) {
+    if (routerId === segRepId) return false;
+    const visited = new Set([routerId]);
+    const queue = [routerId];
+    while (queue.length) {
+      const cur = queue.shift();
+      const adjacentLinks = topo.links.filter((l) => (l.a === cur || l.b === cur) && !l.down);
+      for (const l of adjacentLinks) {
+        const other = l.a === cur ? l.b : l.a;
+        if (visited.has(other)) continue;
+        if (other === segRepId) return true;
+        const n = topo.nodes.get(other);
+        if (!n) continue;
+        if (n.type === 'router' && other !== routerId) continue; // 他のルーターを跨がない
+        visited.add(other);
+        queue.push(other);
+      }
+    }
+    return false;
+  }
+
+  // ルーターごとの隣接ルーター一覧（router-router直結リンクのみ）
+  function rvNeighbors(topo, routerId) {
+    return topo.links
+      .filter((l) => l.routable && (l.a === routerId || l.b === routerId))
+      .map((l) => ({ id: l.a === routerId ? l.b : l.a, link: l }))
+      .filter((nb) => { const n = topo.nodes.get(nb.id); return n && n.type === 'router'; });
+  }
+
+  // ルーターのテーブルを初期化する（coldStart=trueなら空から、falseなら直結情報のみ仕込んでおく）
+  function rvInitTables(topo, segments, coldStart) {
+    topo.nodes.forEach((n) => {
+      if (n.type !== 'router') return;
+      n.rtVector = {};
+      if (coldStart) return;
+      segments.forEach((seg) => {
+        if (seg.repId === n.id) return;
+        if (rvIsDirectlyConnected(topo, n.id, seg.repId)) {
+          n.rtVector[seg.repId] = { cost: 0, nextHop: null };
+        }
+      });
+    });
+  }
+
+  // 1回分の情報交換（同期的なラウンド）。直結セグメントの再確認 → 隣接ルーターへの通知、の順で行う
+  function rvExchangeTick(topo, segments, logFn) {
+    topo.nodes.forEach((n) => {
+      if (n.type !== 'router') return;
+      if (!n.rtVector) n.rtVector = {};
+      segments.forEach((seg) => {
+        if (seg.repId === n.id) return;
+        if (rvIsDirectlyConnected(topo, n.id, seg.repId)) {
+          n.rtVector[seg.repId] = { cost: 0, nextHop: null };
+        }
+      });
+    });
+
+    const nextTables = new Map();
+    topo.nodes.forEach((n) => { if (n.type === 'router') nextTables.set(n.id, Object.assign({}, n.rtVector)); });
+
+    topo.nodes.forEach((n) => {
+      if (n.type !== 'router') return;
+      const myTable = n.rtVector;
+      rvNeighbors(topo, n.id).forEach((nb) => {
+        if (nb.link.down) return;
+        const nbTable = nextTables.get(nb.id);
+        if (!nbTable) return;
+        Object.keys(myTable).forEach((segId) => {
+          if (segId === nb.id) return;
+          const advertised = myTable[segId].cost + nb.link.cost;
+          const existing = nbTable[segId];
+          const shouldAccept = !existing || advertised < existing.cost || existing.nextHop === n.id;
+          if (!shouldAccept) return;
+          if (advertised >= RV_INFINITY) {
+            if (existing && existing.nextHop === n.id) delete nbTable[segId];
+          } else {
+            nbTable[segId] = { cost: advertised, nextHop: n.id };
+          }
+        });
+      });
+    });
+
+    topo.nodes.forEach((n) => {
+      if (n.type !== 'router') return;
+      n.rtVector = nextTables.get(n.id);
+    });
+  }
+
+  function startRvTimer(store, topo, rerender) {
+    stopRvTimer(store);
+    store.rvTimer = setInterval(() => {
+      const segments = computeNetworkSegments(topo);
+      rvExchangeTick(topo, segments);
+      if (rerender) rerender();
+    }, RV_INTERVAL_MS);
+  }
+
+  function stopRvTimer(store) {
+    if (store.rvTimer) { clearInterval(store.rvTimer); store.rvTimer = null; }
+  }
+
+  // リンク状態の変化を即座に隣接ルーターへ伝える（トリガード・アップデート：最初の1ホップ分のみ即時反映）
+  function rvTriggerUpdate(topo) {
+    const segments = computeNetworkSegments(topo);
+    rvExchangeTick(topo, segments);
   }
 
   /* ------------------------------------------------------------------ *
@@ -501,10 +637,11 @@
       if (l.routable) {
         const mx = (pts.x1 + pts.x2) / 2, my = (pts.y1 + pts.y2) / 2;
         const label = l.down ? 'DOWN' : String(l.cost);
-        const bw = l.down ? 52 : 24;
-        const bh = l.down ? 20 : 19;
-        html += `<rect class="link-cost-bg" x="${mx - bw / 2}" y="${my - bh / 2}" width="${bw}" height="${bh}" rx="3"></rect>`;
-        html += `<text class="link-cost${l.down ? ' is-down' : ''}" x="${mx}" y="${my + 5}" text-anchor="middle">${label}</text>`;
+        const bw = l.down ? 52 : 26;
+        const bh = l.down ? 20 : 21;
+        const labelY = l.down ? my : my - 14; // コスト値は上にずらす。DOWNは位置そのまま
+        html += `<rect class="link-cost-bg" x="${mx - bw / 2}" y="${labelY - bh / 2}" width="${bw}" height="${bh}" rx="3"></rect>`;
+        html += `<text class="link-cost${l.down ? ' is-down' : ''}" x="${mx}" y="${labelY + 5}" text-anchor="middle">${label}</text>`;
       }
     });
 
@@ -615,12 +752,13 @@
   const INITIAL_TTL = 8;
   const LINK_LOAD_PER_USE = 2;
 
-  function startFlow(store, topology, path, rerender, logFn) {
-    if (!path || path.length < 2) return null;
+  function startFlow(store, topology, path, dstId, destSegRepId, rerender, logFn) {
+    if (!path || path.length < 1) return null;
     const flow = {
       id: uid('flow'),
       color: nextFlowColor(store),
-      dstId: path[path.length - 1],
+      dstId,
+      destSegRepId,
       path: path.slice(),
       currentIndex: 0,
       state: 'flowing',
@@ -639,6 +777,10 @@
       logFn
     };
     store.flows.push(flow);
+    if (path.length < 2) {
+      decideNextHop(flow);
+      if (flow.state !== 'flowing') return flow;
+    }
     advanceFlowSegment(flow);
     return flow;
   }
@@ -658,6 +800,37 @@
     if (flow.logFn) flow.logFn('fail', `${n ? n.name : atNodeId} 付近でパケットが失われました（${reasonMsg}）`);
     flow.rerender();
     if (flow.onResolved) flow.onResolved('lost');
+  }
+
+  // ルーターが自分の（その時点の）ルーティングテーブルを見て、次のホップをその場で決める
+  function decideNextHop(flow) {
+    const topology = flow.topology;
+    const currentId = flow.path[flow.path.length - 1];
+    const currentNode = topology.nodes.get(currentId);
+    if (!currentNode || currentNode.type !== 'router') return;
+    if (currentId === flow.dstId) return;
+
+    const vec = currentNode.rtVector || {};
+    const entry = flow.destSegRepId ? vec[flow.destSegRepId] : null;
+
+    if (!entry) {
+      loseFlow(flow, currentId, '宛先への経路情報が未学習');
+      return;
+    }
+    if (flow.logFn) {
+      const desc = entry.nextHop === null ? '直結' : (topology.nodes.get(entry.nextHop) ? topology.nodes.get(entry.nextHop).name : '?');
+      flow.logFn('route', `${currentNode.name}: 自分のルーティングテーブルを参照 → 宛先まで残りコスト${entry.cost}、ネクストホップ ${desc}`);
+    }
+    if (entry.nextHop === null) {
+      // 直結：スイッチ経由で宛先PCまでの区間を延長する
+      const result = dijkstra(topology, currentId, flow.dstId);
+      if (!result.reachable) { loseFlow(flow, currentId, '宛先セグメントへの物理経路がありません'); return; }
+      flow.path = flow.path.concat(result.path.slice(1));
+    } else {
+      const link = findLinkBetween(topology, currentId, entry.nextHop);
+      if (!link || link.down) { loseFlow(flow, currentId, 'ネクストホップへのリンクが利用できません'); return; }
+      flow.path.push(entry.nextHop);
+    }
   }
 
   function advanceFlowSegment(flow) {
@@ -687,13 +860,23 @@
     if (flow.state !== 'flowing') return;
     markLinkUsed(flow.topology, flow.segmentFrom, flow.segmentTo);
     flow.currentIndex++;
-    if (flow.currentIndex >= flow.path.length - 1) {
+    const arrivedId = flow.path[flow.currentIndex];
+
+    if (arrivedId === flow.dstId) {
       flow.state = 'done';
       flow.doneAt = Date.now();
+      const n = flow.topology.nodes.get(arrivedId);
+      if (flow.logFn) flow.logFn('ok', `${n ? n.name : arrivedId}: フレーム受信 → デカプセル化 → パケット到達（通信成功）`);
       flow.rerender();
       if (flow.onResolved) flow.onResolved('done');
       setTimeout(() => { flow.iconGone = true; flow.rerender(); }, 600);
       return;
+    }
+
+    if (flow.currentIndex >= flow.path.length - 1) {
+      // 経路の末端＝ここから先はまだ決まっていない。ルーターならその場で次を決める
+      decideNextHop(flow);
+      if (flow.state !== 'flowing') return;
     }
     advanceFlowSegment(flow);
   }
@@ -707,11 +890,13 @@
       const route = computeGatewayRoute(topology, srcId, dstId);
       if (!route.reachable) {
         const src = topology.nodes.get(srcId);
-        logFn('fail', `${src ? src.name : srcId}: 経路を計算できません（${route.error === 'no-gateway' ? 'デフォルトゲートウェイ未設定' : '宛先まで到達不可'}）`);
+        logFn('fail', `${src ? src.name : srcId}: 経路を計算できません（${route.error === 'no-gateway' ? 'デフォルトゲートウェイ未設定' : 'ゲートウェイに到達不可'}）`);
         if (onSettled) onSettled('failed');
         return;
       }
-      const flow = startFlow(store, topology, route.path, rerender, logFn);
+      const segments = computeNetworkSegments(topology);
+      const destSeg = segmentForNode(segments, dstId);
+      const flow = startFlow(store, topology, route.path, dstId, destSeg ? destSeg.repId : null, rerender, logFn);
       if (!flow) { if (onSettled) onSettled('failed'); return; }
       flow.onResolved = (state) => {
         if (state === 'done') { if (onSettled) onSettled('done'); return; }
@@ -764,9 +949,11 @@
     if (downValue && !link.down) {
       link.down = true;
       if (store.autoRecoverEnabled) scheduleAutoRecover(store, topology, link, logFn, rerender);
+      if (link.routable) rvTriggerUpdate(topology); // トリガード・アップデート：即座に隣へ伝播
     } else if (!downValue && link.down) {
       link.down = false;
       if (link._recoveryTimer) { clearTimeout(link._recoveryTimer); link._recoveryTimer = null; }
+      if (link.routable) rvTriggerUpdate(topology);
     }
   }
 
@@ -872,7 +1059,7 @@
       if (opts.onRouteComputed) opts.onRouteComputed(result);
       const msg = result.error === 'no-gateway' ? 'デフォルトゲートウェイが設定されていません'
         : result.error === 'gateway-unreachable' ? 'デフォルトゲートウェイに到達できません'
-        : '到達可能な経路がありません（経路上の全リンクが障害中です）';
+        : '到達可能な経路がありません';
       logFn('fail', msg, t);
       if (opts.onFinish) setTimeout(() => opts.onFinish(result), t + 200);
       return;
@@ -880,7 +1067,7 @@
 
     if (opts.onRouteComputed) opts.onRouteComputed(result);
 
-    // 送信直後（ARP解決あたり）に自動障害を抽選。3経路すべてのリンクが対象。
+    // 送信直後（ARP解決あたり）に自動障害を抽選。ルーター間のリンクすべてが対象。
     if (opts.failRate) {
       const upRoutable = topology.links.filter((l) => l.routable && !l.down);
       if (upRoutable.length && Math.random() * 100 < opts.failRate) {
@@ -894,7 +1081,7 @@
       }
     }
 
-    const gw = findRouterByIp(topology, src.gateway) || firstL3Hop(topology, result.path);
+    const gw = findRouterByIp(topology, src.gateway);
 
     logFn('arp', `${src.name}: ARP要求（ブロードキャスト）— デフォルトゲートウェイ ${gw.ip || src.gateway} のMACアドレスは？`, t); t += STEP;
     logFn('arp', `${gw.name}: ARP応答 — MACアドレス ${gw.mac} を通知`, t); t += STEP;
@@ -908,31 +1095,7 @@
     logFn('ip', `IPパケット生成: src=${src.ip || '-'} dst=${dst.ip || '-'} TTL=${INITIAL_TTL} proto=TCP`, t); t += STEP;
     logFn('frame', `イーサネットフレーム生成: src=${src.mac} dst=${gw.mac} (type=0x0800)`, t); t += STEP;
 
-    if (opts.routeLabel) {
-      logFn('route', `経路選択: ${opts.routeLabel}（合計コスト ${result.cost}）を採用`, t); t += STEP;
-    }
-
-    let ttl = INITIAL_TTL;
-    for (let i = 1; i < result.path.length - 1; i++) {
-      const n = topology.nodes.get(result.path[i]);
-      if (n.type === 'router') {
-        ttl -= 1;
-        const nextNode = topology.nodes.get(result.path[i + 1]);
-        const link = findLinkBetween(topology, n.id, nextNode.id);
-        const metricNote = link && link.routable ? ` (metric ${link.cost})` : '';
-        logFn('route', `${n.name}: 宛先 ${dst.ip || dst.name} への経路検索 → ネクストホップ ${nextNode.name}${metricNote}、TTL=${ttl}`, t); t += STEP;
-        logFn('frame', `${n.name}: フレーム再構築 src=${n.mac} dst=${nextNode.mac}`, t); t += STEP;
-        if (ttl <= 0) {
-          logFn('fail', `${n.name}: TTLが0になったためパケットを破棄しました`, t); t += STEP;
-          if (opts.onFinish) setTimeout(() => opts.onFinish({ reachable: false, path: [], cost: Infinity }), t + 200);
-          return;
-        }
-      } else if (n.type === 'switch') {
-        logFn('sys', `${n.name}: MACアドレステーブル参照 → 該当ポートへフォワード`, t); t += STEP;
-      }
-    }
-
-    logFn('ok', `${dst.name}: フレーム受信 → デカプセル化 → パケット到達（通信成功）`, t); t += STEP;
+    logFn('sys', `${gw.name} に到着後は、各ルーターがその時点のルーティングテーブルを見て1ホップずつ中継先を決定します`, t); t += STEP;
 
     if (opts.onFinish) setTimeout(() => opts.onFinish(result), t + 200);
   }
@@ -959,7 +1122,9 @@
     speedFactor: 1,
     meshEnabled: false,
     lastChosenPath: null,
-    nodeErrors: new Map()
+    nodeErrors: new Map(),
+    coldStart: false,
+    rvTimer: null
   };
 
   function fixedValidate() {
@@ -1161,7 +1326,7 @@
   /* ---- ルーティングテーブル ポップオーバー（クリックしたルーターの経路情報） ---- */
 
   function fixedRoutingTableHtml(router) {
-    const segments = fixedNetworkSegments();
+    const segments = computeNetworkSegments(Fixed.topo);
     const { rows, emptyNote } = computeRoutingTable(Fixed.topo, router.id, segments);
     if (emptyNote && rows.length === 0) {
       return `<p class="popover-note">${emptyNote}</p>`;
@@ -1270,32 +1435,19 @@
       markDown: (link) => setLinkDownState(Fixed, Fixed.topo, link, true, fixedLog, fixedRender),
       onLinkDown: () => fixedRender(),
       onRouteComputed: (result) => {
+        fixedRenderRouteCompare();
         if (result.reachable) {
-          const costs = getRouteCosts(Fixed.topo);
-          const chosen = costs.find((c) => result.path.includes(c.mid));
-          sendOpts.routeLabel = chosen ? `${chosen.label}（RT-S→${chosen.key}→RT-R）` : null;
+          startDeliverySession(Fixed, Fixed.topo, srcId, dstId, fixedRender, fixedLog, (state) => {
+            statusEl.textContent = state === 'done' ? '送信完了' : '送信失敗（不通）';
+          });
+        } else {
+          statusEl.textContent = '送信失敗（不通）';
+          fixedRender();
         }
-        // 経路比較パネルは選択結果を強調
-        renderRouteCompareWithChoice(result, statusEl);
       },
-      routeLabel: null,
       onFinish: () => { /* 実際の到達可否はフローの解決時に statusEl を更新する */ }
     };
     simulateSend(Fixed.topo, srcId, dstId, fixedLog, Fixed.svg, sendOpts);
-  }
-
-  function renderRouteCompareWithChoice(result, statusEl) {
-    Fixed.lastChosenPath = result.reachable ? result.path : null;
-    fixedRenderRouteCompare(Fixed.lastChosenPath);
-
-    if (result.reachable) {
-      startDeliverySession(Fixed, Fixed.topo, result.path[0], result.path[result.path.length - 1], fixedRender, fixedLog, (state) => {
-        if (statusEl) statusEl.textContent = state === 'done' ? '送信完了' : '送信失敗（不通）';
-      });
-    } else {
-      if (statusEl) statusEl.textContent = '送信失敗（不通）';
-      fixedRender();
-    }
   }
 
   function initFixedMode() {
@@ -1304,6 +1456,8 @@
     Fixed.logBadge = document.getElementById('log-badge');
     fixedPopulateSelects();
     fixedValidate();
+    rvInitTables(Fixed.topo, computeNetworkSegments(Fixed.topo), Fixed.coldStart);
+    startRvTimer(Fixed, Fixed.topo, fixedRender);
     fixedRender();
 
     Fixed.svg.addEventListener('click', (e) => {
@@ -1419,6 +1573,16 @@
         fixedLog('sys', 'メッシュ接続を無効にしました（RT-A—RT-B, RT-B—RT-Cは経路計算・表示から除外されます）');
       }
       fixedValidate();
+      rvTriggerUpdate(Fixed.topo);
+      fixedRender();
+    });
+
+    document.getElementById('coldstart-toggle').addEventListener('change', (e) => {
+      Fixed.coldStart = e.target.checked;
+      rvInitTables(Fixed.topo, computeNetworkSegments(Fixed.topo), Fixed.coldStart);
+      fixedLog('sys', Fixed.coldStart
+        ? '各ルーターのテーブルを空にしました。ここから収束していく様子を観察できます'
+        : '各ルーターのテーブルに直結情報を再度仕込みました');
       fixedRender();
     });
 
@@ -1486,7 +1650,9 @@
     autoRecoverEnabled: false,
     speedFactor: 1,
     undoStack: [],
-    redoStack: []
+    redoStack: [],
+    coldStart: false,
+    rvTimer: null
   };
 
   function freeLog(level, msg, delay) { makeLogger(Free.logEl, Free.logBadge)(level, msg, delay); }
@@ -1507,29 +1673,6 @@
       uf.union(keyA, keyB);
     });
     return uf;
-  }
-
-  function freeNetworkSegments() {
-    const uf = freeBuildClusters(Free.topo);
-    const clusters = new Map();
-    uf.keys().forEach((key) => {
-      const root = uf.find(key);
-      if (!clusters.has(root)) clusters.set(root, []);
-      clusters.get(root).push(key);
-    });
-    const segments = [];
-    clusters.forEach((keys) => {
-      for (const k of keys) {
-        if (k.includes('::')) continue; // ルーターI/Fは代表にしない（PCを優先）
-        const n = Free.topo.nodes.get(k);
-        if (n && n.type === 'pc' && isValidIpFormat(n.ip) && isValidMaskFormat(n.mask)) {
-          const label = networkLabelFor(n.ip, n.mask);
-          if (label) segments.push({ label, repId: k });
-          break;
-        }
-      }
-    });
-    return segments;
   }
 
   function freeResolveEntry(topo, key) {
@@ -1781,7 +1924,7 @@
           return popoverIfaceBlockHtml(label, iface.ip, iface.mask, errRec.ifaces[linkId], linkId, true);
         }).join('');
       }
-      const segments = freeNetworkSegments();
+      const segments = computeNetworkSegments(Free.topo);
       const { rows, emptyNote } = computeRoutingTable(Free.topo, node.id, segments);
       let rtHtml;
       if (emptyNote && rows.length === 0) {
@@ -2181,6 +2324,8 @@
     Free.logEl = document.getElementById('free-log');
     Free.logBadge = document.getElementById('free-log-badge');
     freeValidate();
+    rvInitTables(Free.topo, computeNetworkSegments(Free.topo), Free.coldStart);
+    startRvTimer(Free, Free.topo, freeRender);
     freeRender();
     freePopulateSelects();
     freeUpdateSendButtonState();
@@ -2190,6 +2335,14 @@
     });
     document.querySelectorAll('#panel-free [data-mode]').forEach((btn) => {
       btn.addEventListener('click', () => freeSetMode(btn.dataset.mode));
+    });
+    document.getElementById('free-coldstart-toggle').addEventListener('change', (e) => {
+      Free.coldStart = e.target.checked;
+      rvInitTables(Free.topo, computeNetworkSegments(Free.topo), Free.coldStart);
+      freeLog('sys', Free.coldStart
+        ? '各ルーターのテーブルを空にしました。ここから収束していく様子を観察できます'
+        : '各ルーターのテーブルに直結情報を再度仕込みました');
+      freeRender();
     });
     document.getElementById('free-clear').addEventListener('click', () => {
       freePushUndo();

@@ -75,6 +75,12 @@
             メッシュ接続を有効にする（RT-A—RT-B, RT-B—RT-C）
           </label>
         </div>
+        <div class="toolbar-group">
+          <label class="check-label" for="coldstart-toggle">
+            <input type="checkbox" id="coldstart-toggle">
+            収束をゼロから見る（各ルーターのテーブルを空から収束）
+          </label>
+        </div>
         <button class="btn btn-ghost" id="reset-links">全リンク復旧</button>
       </div>
 
@@ -165,6 +171,12 @@
           <label class="field-label" for="free-flow-speed">アニメーション速度</label>
           <input type="range" id="free-flow-speed" min="0.5" max="3" step="0.1" value="1">
           <output id="free-flow-speed-out" class="field-value">1.0x</output>
+        </div>
+        <div class="toolbar-group">
+          <label class="check-label" for="free-coldstart-toggle">
+            <input type="checkbox" id="free-coldstart-toggle">
+            収束をゼロから見る
+          </label>
         </div>
         <button class="btn btn-ghost" id="free-undo" disabled>↺ 元に戻す</button>
         <button class="btn btn-ghost" id="free-redo" disabled>↻ やり直す</button>
