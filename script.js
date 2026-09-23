@@ -236,7 +236,7 @@
       if (!entry) { rows.push({ network: seg.label, nextHop: '—', metric: '未学習', type: 'unreachable' }); return; }
       if (entry.nextHop === null) {
         rows.push({ network: seg.label, nextHop: '直結', metric: entry.cost, type: 'connected' });
-      } else if (entry.cost >= RV_INFINITY) {
+      } else if (entry.cost >= rvInf(topology)) {
         rows.push({ network: seg.label, nextHop: '—', metric: '不通', type: 'unreachable' });
       } else {
         const nextHopNode = topology.nodes.get(entry.nextHop);
@@ -290,7 +290,19 @@
    * 隣接ルーターとのみ定期的に情報交換して収束していく。
    * ------------------------------------------------------------------ */
 
-  const RV_INFINITY = 50;
+  const RV_INFINITY_DEFAULT = 50;
+  function rvInf(topo) { return (topo && topo.rvInfinity) || RV_INFINITY_DEFAULT; }
+
+  // 簡易モード（情報Ⅰ対応）：すべてのリンクをコスト1に固定し、到達不能の基準をホップ数16にする
+  const SIMPLE_MODE_INFINITY = 16;
+  function applySimpleModeToTopology(topo, simple) {
+    topo.rvInfinity = simple ? SIMPLE_MODE_INFINITY : RV_INFINITY_DEFAULT;
+    if (simple) {
+      topo.links.forEach((l) => {
+        if (l.routable) { l.baseCost = 1; l.load = 0; recalcLinkCost(l); }
+      });
+    }
+  }
   const RV_INTERVAL_MS = 2500;
 
   // routerIdから他のルーターを跨がずに（スイッチ経由のみで）segRepIdへ到達できるか
@@ -369,9 +381,9 @@
           const existing = nbTable[segId];
           const shouldAccept = !existing || advertised < existing.cost || existing.nextHop === n.id;
           if (!shouldAccept) return;
-          if (advertised >= RV_INFINITY) {
-            if (existing && existing.nextHop === n.id && existing.cost < RV_INFINITY) {
-              nbTable[segId] = { cost: RV_INFINITY, nextHop: n.id };
+          if (advertised >= rvInf(topo)) {
+            if (existing && existing.nextHop === n.id && existing.cost < rvInf(topo)) {
+              nbTable[segId] = { cost: rvInf(topo), nextHop: n.id };
               changes.push({ fromId: n.id, toId: nb.id, segId, type: 'remove' });
             }
           } else {
@@ -882,11 +894,11 @@
   const INITIAL_TTL = 8;
   const LINK_LOAD_PER_USE = 2;
 
-  function startFlow(store, topology, path, dstId, destSegRepId, rerender, logFn) {
+  function startFlow(store, topology, path, dstId, destSegRepId, rerender, logFn, forcedColor) {
     if (!path || path.length < 1) return null;
     const flow = {
       id: uid('flow'),
-      color: nextFlowColor(store),
+      color: forcedColor || nextFlowColor(store),
       dstId,
       destSegRepId,
       path: path.slice(),
@@ -947,7 +959,7 @@
       loseFlow(flow, currentId, '宛先への経路情報が未学習');
       return;
     }
-    if (entry.cost >= RV_INFINITY) {
+    if (entry.cost >= rvInf(topology)) {
       loseFlow(flow, currentId, '自分のルーティングテーブルでは宛先が不通と判断');
       return;
     }
@@ -1019,6 +1031,7 @@
   function startDeliverySession(store, topology, srcId, dstId, rerender, logFn, onSettled) {
     let attempt = 0;
     const MAX_ATTEMPTS = 5;
+    const sessionColor = nextFlowColor(store); // 再送してもこのセッションは同じ色のまま（同じ通信の続きとして表現）
     function tryAttempt() {
       attempt++;
       const route = computeGatewayRoute(topology, srcId, dstId);
@@ -1030,7 +1043,7 @@
       }
       const segments = computeNetworkSegments(topology);
       const destSeg = segmentForNode(segments, dstId);
-      const flow = startFlow(store, topology, route.path, dstId, destSeg ? destSeg.repId : null, rerender, logFn);
+      const flow = startFlow(store, topology, route.path, dstId, destSeg ? destSeg.repId : null, rerender, logFn, sessionColor);
       if (!flow) { if (onSettled) onSettled('failed'); return; }
       flow.onResolved = (state) => {
         if (state === 'done') { if (onSettled) onSettled('done'); return; }
@@ -1087,8 +1100,8 @@
     if (!router || !router.rtVector) return [];
     const affected = [];
     Object.keys(router.rtVector).forEach((segId) => {
-      if (router.rtVector[segId].nextHop === neighborId && router.rtVector[segId].cost < RV_INFINITY) {
-        router.rtVector[segId] = { cost: RV_INFINITY, nextHop: neighborId };
+      if (router.rtVector[segId].nextHop === neighborId && router.rtVector[segId].cost < rvInf(topo)) {
+        router.rtVector[segId] = { cost: rvInf(topo), nextHop: neighborId };
         affected.push(segId);
       }
     });
@@ -1251,8 +1264,15 @@
 
     const gw = findRouterByIp(topology, src.gateway);
 
-    logFn('arp', `${src.name}: ARP要求（ブロードキャスト）— デフォルトゲートウェイ ${gw.ip || src.gateway} のMACアドレスは？`, t); t += STEP;
-    logFn('arp', `${gw.name}: ARP応答 — MACアドレス ${gw.mac} を通知`, t); t += STEP;
+    const cacheKey = srcId + '::' + gw.id;
+    const cached = opts.arpCache && opts.arpCache.has(cacheKey);
+    if (cached) {
+      logFn('arp', `${src.name}: ARPキャッシュを使用（${gw.name} のMACアドレスは解決済み）`, t); t += STEP;
+    } else {
+      logFn('arp', `${src.name}: ARP要求（ブロードキャスト）— デフォルトゲートウェイ ${gw.ip || src.gateway} のMACアドレスは？`, t); t += STEP;
+      logFn('arp', `${gw.name}: ARP応答 — MACアドレス ${gw.mac} を通知`, t); t += STEP;
+      if (opts.arpCache) opts.arpCache.add(cacheKey);
+    }
 
     const sport = randPort();
     logFn('tcp', `${src.name} → ${dst.name} : TCP SYN  (sport=${sport}, dport=80, seq=0)`, t); t += STEP;
@@ -1295,6 +1315,9 @@
     rvTimer: null,
     pulses: [],
     nodeFlashes: [],
+    arpCache: new Set(),
+    simpleMode: true,
+    paused: false,
     showPeriodicLog: false
   };
 
@@ -1332,7 +1355,7 @@
 
   function fixedUpdateSendButtonState() {
     const btn = document.getElementById('send-btn');
-    if (btn) btn.disabled = fixedHasAnyError();
+    if (btn) btn.disabled = fixedHasAnyError() || Fixed.paused;
   }
 
   function fixedRenderRouteCompare(chosenFullPath) {
@@ -1605,6 +1628,7 @@
 
     const sendOpts = {
       failRate: Fixed.failRate,
+      arpCache: Fixed.arpCache,
       markDown: (link) => setLinkDownState(Fixed, Fixed.topo, link, true, fixedLog, fixedRender),
       onLinkDown: () => fixedRender(),
       onRouteComputed: (result) => {
@@ -1623,12 +1647,53 @@
     simulateSend(Fixed.topo, srcId, dstId, fixedLog, Fixed.svg, sendOpts);
   }
 
+  function fixedResetToInitial(silent) {
+    stopRvTimer(Fixed);
+    stopDriftTimer(Fixed);
+    Fixed.topo.links.forEach((l) => { if (l._recoveryTimer) clearTimeout(l._recoveryTimer); });
+    closeFixedRtPopover();
+    Fixed.topo = makeFixedTopology();
+    applySimpleModeToTopology(Fixed.topo, Fixed.simpleMode);
+    Fixed.flows = [];
+    Fixed.pulses = [];
+    Fixed.nodeFlashes = [];
+    Fixed.arpCache = new Set();
+    Fixed.colorIdx = 0;
+    Fixed.meshEnabled = false;
+    Fixed.rtMode = 'preset';
+    Fixed.lastChosenPath = null;
+    Fixed.nodeErrors = new Map();
+    Fixed.driftEnabled = false;
+    Fixed.autoRecoverEnabled = false;
+    Fixed.speedFactor = 1;
+    Fixed.coldStart = false;
+    const meshToggleEl = document.getElementById('mesh-toggle');
+    if (meshToggleEl) meshToggleEl.checked = false;
+    const rtModeEl = document.getElementById('rt-mode');
+    if (rtModeEl) rtModeEl.value = 'preset';
+    const driftToggleEl = document.getElementById('drift-toggle');
+    if (driftToggleEl) driftToggleEl.checked = false;
+    const autoRecoverEl = document.getElementById('auto-recover-toggle');
+    if (autoRecoverEl) autoRecoverEl.checked = false;
+    const speedEl = document.getElementById('flow-speed');
+    if (speedEl) { speedEl.value = 1; document.getElementById('flow-speed-out').textContent = '1.0x'; }
+    const coldstartEl = document.getElementById('coldstart-toggle');
+    if (coldstartEl) coldstartEl.checked = false;
+    fixedPopulateSelects();
+    fixedValidate();
+    rvInitTables(Fixed.topo, computeNetworkSegments(Fixed.topo), Fixed.coldStart);
+    startRvTimer(Fixed, Fixed.topo, fixedRender, fixedLog);
+    fixedRender();
+    if (!silent) fixedLog('sys', '固定トポロジを初期状態に戻しました');
+  }
+
   function initFixedMode() {
     Fixed.svg = document.getElementById('topo-svg');
     Fixed.logEl = document.getElementById('log');
     Fixed.logBadge = document.getElementById('log-badge');
     fixedPopulateSelects();
     fixedValidate();
+    applySimpleModeToTopology(Fixed.topo, Fixed.simpleMode);
     rvInitTables(Fixed.topo, computeNetworkSegments(Fixed.topo), Fixed.coldStart);
     startRvTimer(Fixed, Fixed.topo, fixedRender, fixedLog);
     fixedRender();
@@ -1653,6 +1718,20 @@
       if (!node || node.type !== 'router') return;
       e.preventDefault();
       openFixedRtPopover(node.id);
+    });
+    // 長押し（スマホ・タブレット向け：右クリックの代わり）
+    let fixedLongPressTimer = null;
+    Fixed.svg.addEventListener('touchstart', (e) => {
+      const nodeTarget = e.target.closest('[data-node-id]');
+      if (!nodeTarget) return;
+      const nodeId = nodeTarget.dataset.nodeId;
+      fixedLongPressTimer = setTimeout(() => {
+        const node = Fixed.topo.nodes.get(nodeId);
+        if (node && node.type === 'router') openFixedRtPopover(node.id);
+      }, 550);
+    }, { passive: true });
+    ['touchend', 'touchmove', 'touchcancel'].forEach((evt) => {
+      Fixed.svg.addEventListener(evt, () => { clearTimeout(fixedLongPressTimer); }, { passive: true });
     });
     document.addEventListener('click', (e) => {
       if (!Fixed.openPopoverNodeId) return;
@@ -1700,6 +1779,12 @@
       Fixed.flows = [];
       fixedLog('sys', 'すべてのリンクを復旧し、経路のハイライトをリセットしました');
       fixedRender();
+    });
+
+    document.getElementById('reset-all').addEventListener('click', () => {
+      if (window.confirm('固定トポロジを初期状態に戻します。リンク障害・コスト設定・メッシュ接続などがすべて元に戻ります。よろしいですか？')) {
+        fixedResetToInitial(false);
+      }
     });
 
     document.getElementById('drift-toggle').addEventListener('change', (e) => {
@@ -1833,6 +1918,9 @@
     rvTimer: null,
     pulses: [],
     nodeFlashes: [],
+    arpCache: new Set(),
+    simpleMode: true,
+    paused: false,
     showPeriodicLog: false
   };
 
@@ -1992,7 +2080,7 @@
     const btn = document.getElementById('free-send-btn');
     const statusEl = document.getElementById('free-send-status');
     const hasError = freeHasAnyError();
-    btn.disabled = hasError;
+    btn.disabled = hasError || Free.paused;
     if (hasError && !statusEl.textContent) statusEl.textContent = 'IPアドレス設定にエラーがあるため送信できません。';
     if (!hasError && statusEl.textContent === 'IPアドレス設定にエラーがあるため送信できません。') statusEl.textContent = '';
   }
@@ -2313,7 +2401,7 @@
       b.classList.toggle('is-active', b.dataset.mode === mode);
     });
     const hint = document.getElementById('free-hint');
-    if (mode === 'move') hint.textContent = 'ノードをドラッグして移動できます。PC／ルーターをクリックするとIP設定を編集できます。';
+    if (mode === 'move') hint.textContent = 'ノードをドラッグして移動できます。PC／ルーターをクリック（スマホは長押し）するとIP設定を編集できます。';
     if (mode === 'link') hint.textContent = '「接続」モードで2つのノードを順にクリックするとリンクを作成します（ルーターは最大4本まで）。';
     if (mode === 'delete') hint.textContent = '「削除」モードでノードまたはリンクをクリックすると削除します。';
     freeRender();
@@ -2415,12 +2503,13 @@
         title: '新しいリンク',
         subtitle: `${nodeA.name} — ${nodeB.name}`,
         initialCost: 1,
-        costEditable: routable,
+        costEditable: routable && !Free.simpleMode,
         initialDown: false,
         onSave: (cost, down) => {
           freePushUndo();
           const id = uid('fl');
-          const link = { id, a, b, cost: routable ? cost : 0, baseCost: routable ? cost : 0, load: 0, down, routable };
+          const finalCost = Free.simpleMode ? 1 : cost;
+          const link = { id, a, b, cost: routable ? finalCost : 0, baseCost: routable ? finalCost : 0, load: 0, down, routable };
           Free.topo.links.push(link);
           if (nodeA.type === 'router' && nodeB.type === 'router') {
             // ルーター同士は新しい共通サブネットを生成し、両端を同じサブネットにする
@@ -2456,7 +2545,7 @@
       title: 'リンク設定',
       subtitle: `${nodeA.name} — ${nodeB.name}`,
       initialCost: link.baseCost != null ? link.baseCost : link.cost,
-      costEditable: link.routable,
+      costEditable: link.routable && !Free.simpleMode,
       initialDown: link.down,
       onSave: (cost, down) => {
         freePushUndo();
@@ -2478,6 +2567,7 @@
     statusEl.textContent = '送信中…';
     simulateSend(Free.topo, srcId, dstId, freeLog, Free.svg, {
       failRate: Free.failRate,
+      arpCache: Free.arpCache,
       markDown: (link) => setLinkDownState(Free, Free.topo, link, true, freeLog, freeRender),
       onLinkDown: () => freeRender(),
       onRouteComputed: (result) => {
@@ -2502,10 +2592,47 @@
     return { x: loc.x, y: loc.y };
   }
 
+  function freeResetToInitial(silent, clearHistory) {
+    stopRvTimer(Free);
+    stopDriftTimer(Free);
+    Free.topo.links.forEach((l) => { if (l._recoveryTimer) clearTimeout(l._recoveryTimer); });
+    closeIpPopover();
+    Free.topo.nodes.clear();
+    Free.topo.links = [];
+    Free.typeCounters = { pc: 0, switch: 0, router: 0 };
+    Free.flows = [];
+    Free.pulses = [];
+    Free.nodeFlashes = [];
+    Free.arpCache = new Set();
+    Free.colorIdx = 0;
+    Free.ifaceCounter = 0;
+    Free.nodeErrors = new Map();
+    Free.driftEnabled = false;
+    Free.autoRecoverEnabled = false;
+    Free.speedFactor = 1;
+    Free.coldStart = false;
+    if (clearHistory) { Free.undoStack = []; Free.redoStack = []; }
+    Free.topo.rvInfinity = Free.simpleMode ? SIMPLE_MODE_INFINITY : RV_INFINITY_DEFAULT;
+    const driftToggleEl = document.getElementById('free-drift-toggle');
+    if (driftToggleEl) driftToggleEl.checked = false;
+    const autoRecoverEl = document.getElementById('free-auto-recover-toggle');
+    if (autoRecoverEl) autoRecoverEl.checked = false;
+    const speedEl = document.getElementById('free-flow-speed');
+    if (speedEl) { speedEl.value = 1; document.getElementById('free-flow-speed-out').textContent = '1.0x'; }
+    const coldstartEl = document.getElementById('free-coldstart-toggle');
+    if (coldstartEl) coldstartEl.checked = false;
+    freeUpdateUndoRedoButtons();
+    freeRevalidateAndRender();
+    freePopulateSelects();
+    startRvTimer(Free, Free.topo, freeRender, freeLog);
+    if (!silent) freeLog('sys', 'すべて消去しました');
+  }
+
   function initFreeMode() {
     Free.svg = document.getElementById('free-svg');
     Free.logEl = document.getElementById('free-log');
     Free.logBadge = document.getElementById('free-log-badge');
+    Free.topo.rvInfinity = Free.simpleMode ? SIMPLE_MODE_INFINITY : RV_INFINITY_DEFAULT;
     freeValidate();
     rvInitTables(Free.topo, computeNetworkSegments(Free.topo), Free.coldStart);
     startRvTimer(Free, Free.topo, freeRender, freeLog);
@@ -2533,16 +2660,7 @@
     });
     document.getElementById('free-clear').addEventListener('click', () => {
       freePushUndo();
-      Free.topo.nodes.clear();
-      Free.topo.links = [];
-      Free.typeCounters = { pc: 0, switch: 0, router: 0 };
-      Free.flows = [];
-      Free.ifaceCounter = 0;
-      Free.nodeErrors = new Map();
-      closeIpPopover();
-      freeRevalidateAndRender();
-      freePopulateSelects();
-      freeLog('sys', 'すべて消去しました');
+      freeResetToInitial(false, false);
     });
     document.getElementById('free-send-btn').addEventListener('click', freeSend);
     document.getElementById('free-undo').addEventListener('click', freeUndo);
@@ -2618,6 +2736,20 @@
       if (!node || node.type === 'switch') return;
       e.preventDefault();
       openIpPopover(node.id);
+    });
+    // 長押し（スマホ・タブレット向け：右クリックの代わり）
+    let freeLongPressTimer = null;
+    Free.svg.addEventListener('touchstart', (e) => {
+      const nodeTarget = e.target.closest('[data-node-id]');
+      if (!nodeTarget) return;
+      const nodeId = nodeTarget.dataset.nodeId;
+      freeLongPressTimer = setTimeout(() => {
+        const node = Free.topo.nodes.get(nodeId);
+        if (node && node.type !== 'switch') openIpPopover(node.id);
+      }, 550);
+    }, { passive: true });
+    ['touchend', 'touchmove', 'touchcancel'].forEach((evt) => {
+      Free.svg.addEventListener(evt, () => { clearTimeout(freeLongPressTimer); }, { passive: true });
     });
 
     document.addEventListener('click', (e) => {
@@ -2698,9 +2830,106 @@
     });
   }
 
+  function initModeToggle() {
+    const toggle = document.getElementById('advanced-mode-toggle');
+    if (!toggle) return;
+    toggle.addEventListener('change', (e) => {
+      const advanced = e.target.checked;
+      document.body.classList.toggle('mode-advanced', advanced);
+      Fixed.simpleMode = !advanced;
+      Free.simpleMode = !advanced;
+      fixedResetToInitial(true);
+      freeResetToInitial(true, true);
+      const msg = advanced ? '詳細モードに切り替えました（状態を初期化しました）' : '簡易モードに切り替えました（状態を初期化しました）';
+      fixedLog('sys', msg);
+      freeLog('sys', msg);
+    });
+  }
+
+  /* ---- 一時停止（見た目の動き・タイマーのみ止める。設定操作は引き続き可能） ---- */
+
+  function pauseStore(store) {
+    store.paused = true;
+    stopRvTimer(store);
+    stopDriftTimer(store);
+    const now = Date.now();
+    store.flows.forEach((flow) => {
+      if (flow.state !== 'flowing' || !flow.segmentStartedAt) return;
+      const elapsed = now - flow.segmentStartedAt;
+      flow.pausedProgress = clamp(elapsed / flow.segmentDurationMs, 0, 0.99);
+      clearTimeout(flow.segmentTimer);
+      flow.segmentTimer = null;
+    });
+  }
+
+  function resumeStore(store, topo, rerender, logFn) {
+    store.paused = false;
+    startRvTimer(store, topo, rerender, logFn);
+    if (store.driftEnabled) startDriftTimer(topo, store, logFn, rerender);
+    const now = Date.now();
+    store.flows.forEach((flow) => {
+      if (flow.state !== 'flowing' || flow.pausedProgress == null) return;
+      const remaining = flow.segmentDurationMs * (1 - flow.pausedProgress);
+      flow.segmentProgressAtRestart = flow.pausedProgress;
+      flow.segmentStartedAt = now;
+      flow.segmentDurationMs = remaining;
+      flow.pausedProgress = null;
+      flow.segmentTimer = setTimeout(() => onSegmentComplete(flow), remaining);
+    });
+    rerender();
+  }
+
+  function initPauseButtons() {
+    const fixedBtn = document.getElementById('pause-toggle');
+    if (fixedBtn) {
+      fixedBtn.addEventListener('click', () => {
+        if (Fixed.paused) {
+          resumeStore(Fixed, Fixed.topo, fixedRender, fixedLog);
+          fixedBtn.textContent = '⏸ 一時停止';
+          fixedBtn.classList.remove('is-active');
+        } else {
+          pauseStore(Fixed);
+          fixedBtn.textContent = '▶ 再開';
+          fixedBtn.classList.add('is-active');
+        }
+        fixedUpdateSendButtonState();
+      });
+    }
+    const freeBtn = document.getElementById('free-pause-toggle');
+    if (freeBtn) {
+      freeBtn.addEventListener('click', () => {
+        if (Free.paused) {
+          resumeStore(Free, Free.topo, freeRender, freeLog);
+          freeBtn.textContent = '⏸ 一時停止';
+          freeBtn.classList.remove('is-active');
+        } else {
+          pauseStore(Free);
+          freeBtn.textContent = '▶ 再開';
+          freeBtn.classList.add('is-active');
+        }
+        freeUpdateSendButtonState();
+      });
+    }
+  }
+
+  function initHelpOverlay() {
+    const btn = document.getElementById('help-btn');
+    const backdrop = document.getElementById('help-backdrop');
+    const closeBtn = document.getElementById('help-close');
+    if (!btn || !backdrop) return;
+    btn.addEventListener('click', () => backdrop.classList.remove('is-hidden'));
+    closeBtn.addEventListener('click', () => backdrop.classList.add('is-hidden'));
+    backdrop.addEventListener('click', (e) => {
+      if (e.target.id === 'help-backdrop') backdrop.classList.add('is-hidden');
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
     initTabs();
     initThemeToggle();
+    initModeToggle();
+    initHelpOverlay();
+    initPauseButtons();
     initModal();
     initFixedMode();
     initFreeMode();

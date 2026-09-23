@@ -155,6 +155,14 @@ select, input{ font-family: inherit; }
   box-shadow: inset 0 0 0 1px var(--border-soft);
 }
 
+.topbar-tools{
+  display:flex;
+  align-items:center;
+  gap: 14px;
+}
+.advanced-only{ display:none; }
+body.mode-advanced .advanced-only{ display:flex; }
+
 .panel{
   display: grid;
   grid-template-columns: 1fr 360px;
@@ -287,6 +295,16 @@ input[type="range"]{
   color: var(--signal);
   background: rgba(240,169,78,.08);
 }
+.btn-danger{
+  background: transparent;
+  border-color: var(--danger-dim);
+  color: var(--danger);
+}
+.btn-danger:hover{
+  border-color: var(--danger);
+  color: var(--danger);
+  background: rgba(226,88,76,.08);
+}
 .btn-mini{
   padding: 4px 10px;
   font-size: 11.5px;
@@ -300,6 +318,11 @@ input[type="range"]{
   background: var(--accent-dim);
   border-color: var(--accent);
   color: var(--accent);
+}
+.btn-ghost.is-active{
+  background: var(--signal-dim);
+  border-color: var(--signal);
+  color: var(--signal);
 }
 
 .stage-canvas-wrap{
@@ -735,6 +758,52 @@ table.rt-tbl input[type="number"]{
   padding: 20px;
   width: 300px;
   box-shadow: 0 20px 60px rgba(0,0,0,.5);
+}
+.help-modal{
+  width: min(640px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.help-header{
+  display:flex;
+  align-items:center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.help-header h3{ margin:0; font-size:16px; }
+.help-body{
+  overflow-y: auto;
+  padding-right: 6px;
+}
+.help-section{ margin-bottom: 20px; }
+.help-section:last-child{ margin-bottom:0; }
+.help-section h4{
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 6px;
+}
+.help-section p{
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}
+.help-section p strong{ color: var(--text); }
+.glossary{ margin: 0 0 16px; }
+.glossary dt{
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+  margin-top: 8px;
+}
+.glossary dd{
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
 }
 .modal h3{ margin:0 0 6px; font-size:15px; }
 .modal-sub{
