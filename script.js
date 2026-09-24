@@ -1538,8 +1538,31 @@
     </table>`;
   }
 
+  // ポップオーバーを再描画する際、入力中のフォーカス位置を保持するための共通ヘルパー
+  function withFocusPreserved(popEl, rebuildFn) {
+    const active = document.activeElement;
+    const wasFocused = active && popEl.contains(active);
+    const focusKey = wasFocused ? active.dataset.key : null;
+    const focusField = wasFocused ? active.dataset.field : null;
+    const selStart = wasFocused && typeof active.selectionStart === 'number' ? active.selectionStart : null;
+    rebuildFn();
+    if (focusKey != null) {
+      const restore = popEl.querySelector(`[data-key="${focusKey}"][data-field="${focusField}"]`);
+      if (restore) {
+        restore.focus();
+        if (selStart != null && typeof restore.setSelectionRange === 'function') {
+          try { restore.setSelectionRange(selStart, selStart); } catch (e) { /* 無視 */ }
+        }
+      }
+    }
+  }
+
   function renderFixedRtPopoverContent(node) {
     const pop = document.getElementById('fixed-rt-popover');
+    withFocusPreserved(pop, () => renderFixedRtPopoverContentInner(node, pop));
+  }
+
+  function renderFixedRtPopoverContentInner(node, pop) {
     const errRec = Fixed.nodeErrors.get(node.id) || { self: {}, ifaces: {} };
 
     let ipSection = '<div class="popover-section-title">IPアドレス設定</div>';
@@ -1898,7 +1921,7 @@
     interactionMode: 'move',
     linkFirstPick: null,
     hoverNodeId: null,
-    typeCounters: { pc: 0, switch: 0, router: 0 },
+    usedNumbers: { pc: new Set(), switch: new Set(), router: new Set() },
     placeCursor: { x: 140, y: 120 },
     dragging: null,
     flows: [],
@@ -2063,6 +2086,19 @@
       }
     });
 
+    // ノード名の検証（空欄・重複）：種類をまたいで重複禁止
+    const nameCounts = new Map();
+    topo.nodes.forEach((n) => {
+      const key = (n.name || '').trim();
+      if (key) nameCounts.set(key, (nameCounts.get(key) || 0) + 1);
+    });
+    topo.nodes.forEach((n) => {
+      const rec = errorMap.get(n.id);
+      const key = (n.name || '').trim();
+      if (!key) { rec.hasError = true; rec.nameError = 'empty'; return; }
+      if (nameCounts.get(key) > 1) { rec.hasError = true; rec.nameError = 'dup'; }
+    });
+
     return errorMap;
   }
 
@@ -2169,22 +2205,46 @@
     </div>`;
   }
 
+  function popoverNameErrorText(errObj) {
+    if (!errObj) return '';
+    if (errObj === 'empty') return '名前を入力してください';
+    if (errObj === 'dup') return 'この名前は他のノードと重複しています';
+    return '';
+  }
+
+  function popoverNameBlockHtml(name, nameError) {
+    const hasErr = !!nameError;
+    return `<div class="iface-block">
+      <div class="iface-label">ノード名</div>
+      <div class="iface-row">
+        <input type="text" class="ip-field name-field ${hasErr ? 'has-error' : ''}" data-key="name" data-field="name" value="${name || ''}" placeholder="名前">
+      </div>
+      <div class="iface-error-msg">${popoverNameErrorText(nameError)}</div>
+    </div>`;
+  }
+
   function renderIpPopoverContent(node) {
     const pop = document.getElementById('ip-popover');
     if (!node) return;
-    const errRec = Free.nodeErrors.get(node.id) || { self: {}, ifaces: {} };
+    withFocusPreserved(pop, () => renderIpPopoverContentInner(node, pop));
+  }
 
-    let body = '';
-    if (node.type === 'pc') {
-      body = `<div class="popover-section-title">IPアドレス設定</div>` +
+  function renderIpPopoverContentInner(node, pop) {
+    const errRec = Free.nodeErrors.get(node.id) || { self: {}, ifaces: {}, nameError: null };
+
+    let body = popoverNameBlockHtml(node.name, errRec.nameError);
+    if (node.type === 'switch') {
+      // スイッチは名前のみ編集可能（IP設定なし）
+    } else if (node.type === 'pc') {
+      body += `<div class="popover-section-title">IPアドレス設定</div>` +
         popoverIfaceBlockHtml('IPアドレス／マスク', node.ip, node.mask, errRec.self, 'self', true) +
         popoverGatewayBlockHtml(node.gateway, errRec.gateway, true);
     } else if (node.type === 'router') {
       const linkIds = Object.keys(node.ifaces || {});
       if (linkIds.length === 0) {
-        body = '<div class="popover-section-title">IPアドレス設定</div><p class="iface-empty">まだリンクが接続されていません。</p>';
+        body += '<div class="popover-section-title">IPアドレス設定</div><p class="iface-empty">まだリンクが接続されていません。</p>';
       } else {
-        body = '<div class="popover-section-title">IPアドレス設定</div>' + linkIds.map((linkId) => {
+        body += '<div class="popover-section-title">IPアドレス設定</div>' + linkIds.map((linkId) => {
           const link = Free.topo.links.find((l) => l.id === linkId);
           const otherId = link ? (link.a === node.id ? link.b : link.a) : null;
           const other = otherId ? Free.topo.nodes.get(otherId) : null;
@@ -2218,7 +2278,9 @@
       input.addEventListener('focus', () => { freePushUndo(); });
       input.addEventListener('input', () => {
         const key = input.dataset.key, field = input.dataset.field;
-        if (field === 'gateway') {
+        if (field === 'name') {
+          node.name = input.value;
+        } else if (field === 'gateway') {
           node.gateway = input.value;
         } else if (node.type === 'pc') {
           if (field === 'ip') node.ip = input.value; else node.mask = input.value;
@@ -2230,6 +2292,8 @@
         freeRenderSvg();
         freeUpdateSendButtonState();
         refreshIpPopoverFieldStyles(node);
+        const titleSpan = pop.querySelector('.ip-popover-title span');
+        if (titleSpan && field === 'name') titleSpan.textContent = `${node.name} の設定`;
       });
     });
     document.getElementById('ip-popover-close').addEventListener('click', closeIpPopover);
@@ -2237,14 +2301,14 @@
 
   function refreshIpPopoverFieldStyles(node) {
     const pop = document.getElementById('ip-popover');
-    const errRec = Free.nodeErrors.get(node.id) || { self: {}, ifaces: {} };
+    const errRec = Free.nodeErrors.get(node.id) || { self: {}, ifaces: {}, nameError: null };
     pop.querySelectorAll('.ip-field, .mask-input').forEach((input) => {
       const key = input.dataset.key;
-      const errObj = key === 'gateway' ? errRec.gateway : (key === 'self' ? errRec.self : errRec.ifaces[key]);
-      const hasErr = key === 'gateway' ? !!errObj : (errObj && (errObj.format || errObj.reserved || errObj.dup || errObj.subnet));
+      const errObj = key === 'name' ? errRec.nameError : (key === 'gateway' ? errRec.gateway : (key === 'self' ? errRec.self : errRec.ifaces[key]));
+      const hasErr = key === 'name' ? !!errObj : (key === 'gateway' ? !!errObj : (errObj && (errObj.format || errObj.reserved || errObj.dup || errObj.subnet)));
       input.classList.toggle('has-error', !!hasErr);
       const msgEl = input.closest('.iface-block').querySelector('.iface-error-msg');
-      if (msgEl) msgEl.textContent = key === 'gateway' ? gatewayFieldErrorText(errObj) : popoverFieldErrorText(errObj);
+      if (msgEl) msgEl.textContent = key === 'name' ? popoverNameErrorText(errObj) : (key === 'gateway' ? gatewayFieldErrorText(errObj) : popoverFieldErrorText(errObj));
     });
   }
 
@@ -2273,7 +2337,11 @@
         delete copy._recoveryTimer;
         return JSON.parse(JSON.stringify(copy));
       }),
-      typeCounters: Object.assign({}, Free.typeCounters),
+      usedNumbers: {
+        pc: Array.from(Free.usedNumbers.pc),
+        switch: Array.from(Free.usedNumbers.switch),
+        router: Array.from(Free.usedNumbers.router)
+      },
       ifaceCounter: Free.ifaceCounter
     };
   }
@@ -2282,7 +2350,11 @@
     Free.topo.links.forEach((l) => { if (l._recoveryTimer) { clearTimeout(l._recoveryTimer); l._recoveryTimer = null; } });
     Free.topo.nodes = new Map(snap.nodes.map(([id, n]) => [id, JSON.parse(JSON.stringify(n))]));
     Free.topo.links = snap.links.map((l) => JSON.parse(JSON.stringify(l)));
-    Free.typeCounters = Object.assign({}, snap.typeCounters);
+    Free.usedNumbers = {
+      pc: new Set(snap.usedNumbers.pc),
+      switch: new Set(snap.usedNumbers.switch),
+      router: new Set(snap.usedNumbers.router)
+    };
     Free.ifaceCounter = snap.ifaceCounter;
     if (Free.openPopoverNodeId && !Free.topo.nodes.has(Free.openPopoverNodeId)) closeIpPopover();
     freeRevalidateAndRender();
@@ -2324,14 +2396,22 @@
     if (redoBtn) redoBtn.disabled = Free.redoStack.length === 0;
   }
 
+  // 空き番号（削除済みの番号）を優先して使う採番ヘルパー
+  function freeNextNumber(type) {
+    const used = Free.usedNumbers[type];
+    let n = 1;
+    while (used.has(n)) n++;
+    used.add(n);
+    return n;
+  }
+
   function freeAddNode(type) {
     freePushUndo();
-    Free.typeCounters[type] += 1;
-    const n = Free.typeCounters[type];
+    const n = freeNextNumber(type);
     const id = uid('f' + type);
     const name = `${FREE_TYPE_LABEL[type]}-${n}`;
     const mac = randMac();
-    const node = { id, type, name, mac, x: 0, y: 0 };
+    const node = { id, type, name, mac, x: 0, y: 0, autoNumber: n };
     if (type === 'pc') {
       node.ip = `10.20.0.${n}`;
       node.mask = '/24';
@@ -2459,7 +2539,7 @@
   function freeHandleNodeClick(nodeId) {
     if (Free.interactionMode === 'move') {
       const n = Free.topo.nodes.get(nodeId);
-      if (!n || n.type === 'switch') return;
+      if (!n) return;
       if (Free.openPopoverNodeId === nodeId) { closeIpPopover(); freeRender(); return; }
       openIpPopover(nodeId);
       return;
@@ -2470,6 +2550,7 @@
       linksToRemove.forEach(freeRemoveLinkIfaces);
       Free.topo.links = Free.topo.links.filter((l) => l.a !== nodeId && l.b !== nodeId);
       const n = Free.topo.nodes.get(nodeId);
+      if (n && n.autoNumber != null && Free.usedNumbers[n.type]) Free.usedNumbers[n.type].delete(n.autoNumber);
       Free.topo.nodes.delete(nodeId);
       if (Free.openPopoverNodeId === nodeId) closeIpPopover();
       freeLog('sys', `${n ? n.name : nodeId} を削除しました`);
@@ -2599,7 +2680,7 @@
     closeIpPopover();
     Free.topo.nodes.clear();
     Free.topo.links = [];
-    Free.typeCounters = { pc: 0, switch: 0, router: 0 };
+    Free.usedNumbers = { pc: new Set(), switch: new Set(), router: new Set() };
     Free.flows = [];
     Free.pulses = [];
     Free.nodeFlashes = [];
@@ -2733,7 +2814,7 @@
       const nodeTarget = e.target.closest('[data-node-id]');
       if (!nodeTarget) return;
       const node = Free.topo.nodes.get(nodeTarget.dataset.nodeId);
-      if (!node || node.type === 'switch') return;
+      if (!node) return;
       e.preventDefault();
       openIpPopover(node.id);
     });
@@ -2745,7 +2826,7 @@
       const nodeId = nodeTarget.dataset.nodeId;
       freeLongPressTimer = setTimeout(() => {
         const node = Free.topo.nodes.get(nodeId);
-        if (node && node.type !== 'switch') openIpPopover(node.id);
+        if (node) openIpPopover(node.id);
       }, 550);
     }, { passive: true });
     ['touchend', 'touchmove', 'touchcancel'].forEach((evt) => {
