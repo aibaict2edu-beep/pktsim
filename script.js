@@ -1603,6 +1603,43 @@
     document.getElementById('fixed-rt-popover-close').addEventListener('click', closeFixedRtPopover);
   }
 
+  // ポップオーバーの表示位置を計算する共通処理。
+  // 画面下にはみ出す場合はノードの上側に開き、それでも入らない場合は内部スクロールに任せる。
+  function positionPopoverGeneric(pop, wrap, screenX, screenY) {
+    const wrapRect = wrap.getBoundingClientRect();
+    const relX = screenX - wrapRect.left;
+    const relY = screenY - wrapRect.top;
+
+    // サイズを測るため、視覚的には隠したまま一時的に表示する
+    const wasHidden = pop.classList.contains('is-hidden');
+    pop.style.visibility = 'hidden';
+    pop.classList.remove('is-hidden');
+    pop.style.maxHeight = '420px';
+    const popRect = pop.getBoundingClientRect();
+    const popHeight = popRect.height || 300;
+    const popWidth = popRect.width || 260;
+
+    let left = relX + 36;
+    left = clamp(left, 8, Math.max(8, wrapRect.width - popWidth - 8));
+
+    const spaceBelow = wrapRect.height - (relY - 20);
+    const spaceAbove = relY - 20;
+    let top;
+    if (spaceBelow >= popHeight + 8 || spaceAbove < popHeight) {
+      top = relY - 20; // 下に開く（十分な余白がある、または上でも入りきらない場合）
+    } else {
+      top = relY - popHeight + 20; // 上に開く
+    }
+    top = clamp(top, 8, Math.max(8, wrapRect.height - 20));
+
+    const maxAllowed = Math.min(420, Math.max(160, wrapRect.height - 16));
+    pop.style.maxHeight = maxAllowed + 'px';
+    pop.style.left = left + 'px';
+    pop.style.top = top + 'px';
+    pop.style.visibility = '';
+    if (wasHidden) { /* 呼び出し元が直後に is-hidden を外すので、ここでは何もしない */ }
+  }
+
   function positionFixedRtPopover(node) {
     const pop = document.getElementById('fixed-rt-popover');
     const wrap = Fixed.svg.closest('.stage-canvas-wrap');
@@ -1612,13 +1649,7 @@
     const ctm = Fixed.svg.getScreenCTM();
     if (!ctm) return;
     const screenPt = pt.matrixTransform(ctm);
-    const wrapRect = wrap.getBoundingClientRect();
-    let left = screenPt.x - wrapRect.left + 36;
-    let top = screenPt.y - wrapRect.top - 20;
-    left = clamp(left, 8, wrapRect.width - 280);
-    top = clamp(top, 8, wrapRect.height - 20);
-    pop.style.left = left + 'px';
-    pop.style.top = top + 'px';
+    positionPopoverGeneric(pop, wrap, screenPt.x, screenPt.y);
   }
 
   function openFixedRtPopover(nodeId) {
@@ -1885,8 +1916,23 @@
     document.getElementById('cost-modal-title').textContent = cfg.title || 'リンク設定';
     document.getElementById('cost-modal-sub').textContent = cfg.subtitle || '';
     const costInput = document.getElementById('cost-input');
+    const metricBlock = document.getElementById('cost-metric-block');
+    const noteEl = document.getElementById('cost-metric-note');
     costInput.value = cfg.initialCost != null ? cfg.initialCost : 1;
     costInput.disabled = cfg.costEditable === false;
+    if (cfg.notRoutable) {
+      // ルーターが絡まない接続にはコストの概念がない
+      metricBlock.classList.add('is-hidden');
+      noteEl.textContent = 'このリンクにはコストの概念がありません（ルーターが関わる接続のみメトリックを設定できます）。';
+      noteEl.classList.remove('is-hidden');
+    } else if (cfg.costEditable === false) {
+      metricBlock.classList.remove('is-hidden');
+      noteEl.textContent = '簡易モードのため、コストは1に固定されています。編集するには「詳細モード」に切り替えてください。';
+      noteEl.classList.remove('is-hidden');
+    } else {
+      metricBlock.classList.remove('is-hidden');
+      noteEl.classList.add('is-hidden');
+    }
     document.getElementById('cost-down-check').checked = !!cfg.initialDown;
     modalSaveCb = cfg.onSave;
     backdrop.classList.remove('is-hidden');
@@ -2143,13 +2189,7 @@
     const wrap = Free.svg.closest('.stage-canvas-wrap');
     if (!node || !wrap) return;
     const screenPt = svgToScreen(Free.svg, node.x, node.y);
-    const wrapRect = wrap.getBoundingClientRect();
-    let left = screenPt.x - wrapRect.left + 36;
-    let top = screenPt.y - wrapRect.top - 20;
-    left = clamp(left, 8, wrapRect.width - 280);
-    top = clamp(top, 8, wrapRect.height - 20);
-    pop.style.left = left + 'px';
-    pop.style.top = top + 'px';
+    positionPopoverGeneric(pop, wrap, screenPt.x, screenPt.y);
   }
 
   // IPポップオーバー共通ヘルパー（固定トポロジ・自由配置の両方で使用）
@@ -2293,6 +2333,7 @@
         freeRenderSvg();
         freeUpdateSendButtonState();
         refreshIpPopoverFieldStyles(node);
+        if (node.type === 'pc' && (field === 'name' || field === 'ip')) freePopulateSelects();
         const titleSpan = pop.querySelector('.ip-popover-title span');
         if (titleSpan && field === 'name') titleSpan.textContent = `${node.name} の設定`;
       });
@@ -2587,6 +2628,7 @@
         subtitle: `${nodeA.name} — ${nodeB.name}`,
         initialCost: 1,
         costEditable: routable && !Free.simpleMode,
+        notRoutable: !routable,
         initialDown: false,
         onSave: (cost, down) => {
           freePushUndo();
@@ -2629,6 +2671,7 @@
       subtitle: `${nodeA.name} — ${nodeB.name}`,
       initialCost: link.baseCost != null ? link.baseCost : link.cost,
       costEditable: link.routable && !Free.simpleMode,
+      notRoutable: !link.routable,
       initialDown: link.down,
       onSave: (cost, down) => {
         freePushUndo();
@@ -2673,6 +2716,105 @@
     if (!ctm) return { x: 0, y: 0 };
     const loc = pt.matrixTransform(ctm.inverse());
     return { x: loc.x, y: loc.y };
+  }
+
+  /* ---- 自由配置の保存／読込（JSONファイル） ---- */
+
+  function freeDefaultFileName() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return `packetpath-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  }
+
+  function freeExportTopology() {
+    return {
+      version: 1,
+      nodes: Array.from(Free.topo.nodes.entries()).map(([id, n]) => [id, Object.assign({}, n)]),
+      links: Free.topo.links.map((l) => {
+        const copy = Object.assign({}, l);
+        delete copy._recoveryTimer;
+        return copy;
+      }),
+      usedNumbers: {
+        pc: Array.from(Free.usedNumbers.pc),
+        switch: Array.from(Free.usedNumbers.switch),
+        router: Array.from(Free.usedNumbers.router)
+      },
+      nextSlotIndex: Free.nextSlotIndex,
+      ifaceCounter: Free.ifaceCounter
+    };
+  }
+
+  function freeSaveToFile() {
+    const fileName = window.prompt('保存するファイル名を入力してください', freeDefaultFileName());
+    if (!fileName) return; // キャンセル
+    const data = freeExportTopology();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName.toLowerCase().endsWith('.json') ? fileName : fileName + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    freeLog('sys', `ネットワーク構成を「${a.download}」として保存しました`);
+  }
+
+  function freeImportTopology(data) {
+    stopRvTimer(Free);
+    stopDriftTimer(Free);
+    Free.topo.links.forEach((l) => { if (l._recoveryTimer) clearTimeout(l._recoveryTimer); });
+    closeIpPopover();
+    Free.topo.nodes = new Map((data.nodes || []).map(([id, n]) => [id, Object.assign({}, n)]));
+    Free.topo.links = (data.links || []).map((l) => Object.assign({}, l));
+    Free.usedNumbers = {
+      pc: new Set((data.usedNumbers && data.usedNumbers.pc) || []),
+      switch: new Set((data.usedNumbers && data.usedNumbers.switch) || []),
+      router: new Set((data.usedNumbers && data.usedNumbers.router) || [])
+    };
+    Free.nextSlotIndex = data.nextSlotIndex != null ? data.nextSlotIndex : Free.topo.nodes.size;
+    Free.ifaceCounter = data.ifaceCounter || 0;
+    Free.flows = [];
+    Free.pulses = [];
+    Free.nodeFlashes = [];
+    Free.arpCache = new Set();
+    Free.colorIdx = 0;
+    Free.undoStack = [];
+    Free.redoStack = [];
+    // 現在のモードに合わせてコストを調整する（詳細モードに戻したとき、読み込んだファイルの値を復元できるよう記憶しておく）
+    if (Free.simpleMode) {
+      Free.topo.links.forEach((l) => {
+        if (l.routable) {
+          if (l._rememberedBaseCost == null) l._rememberedBaseCost = l.baseCost;
+          l.baseCost = 1;
+          l.load = 0;
+          recalcLinkCost(l);
+        }
+      });
+    }
+    Free.topo.rvInfinity = Free.simpleMode ? SIMPLE_MODE_INFINITY : RV_INFINITY_DEFAULT;
+    freeUpdateUndoRedoButtons();
+    freeValidate();
+    rvInitTables(Free.topo, computeNetworkSegments(Free.topo), Free.coldStart);
+    startRvTimer(Free, Free.topo, freeRender, freeLog);
+    freeRender();
+    freePopulateSelects();
+  }
+
+  function freeLoadFromFile(file) {
+    if (!window.confirm('ファイルを読み込むと、現在の自由配置の内容は上書きされます。よろしいですか？')) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target.result);
+        freeImportTopology(data);
+        freeLog('sys', `「${file.name}」からネットワーク構成を読み込みました`);
+      } catch (err) {
+        freeLog('fail', 'ファイルの読み込みに失敗しました（形式が正しくない可能性があります）');
+      }
+    };
+    reader.readAsText(file);
   }
 
   function freeResetToInitial(silent, clearHistory) {
@@ -2741,6 +2883,15 @@
     document.getElementById('free-periodic-log-toggle').addEventListener('change', (e) => {
       Free.showPeriodicLog = e.target.checked;
       freeLog('sys', Free.showPeriodicLog ? '定期交換ログの表示を有効にしました' : '定期交換ログの表示を停止しました');
+    });
+    document.getElementById('free-save').addEventListener('click', freeSaveToFile);
+    document.getElementById('free-load').addEventListener('click', () => {
+      document.getElementById('free-load-input').click();
+    });
+    document.getElementById('free-load-input').addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (file) freeLoadFromFile(file);
+      e.target.value = ''; // 同じファイルを連続で選んでも change が発火するように
     });
     document.getElementById('free-clear').addEventListener('click', () => {
       freePushUndo();
@@ -2914,17 +3065,80 @@
     });
   }
 
+  // 詳細⇔簡易モードの切替：状態をリセットせず、コスト・しきい値・発展機能だけを調整する
+  function autoDisableAdvancedFeatures(store, topo, idPrefix) {
+    let anyWasOn = false;
+    if (store.driftEnabled) {
+      store.driftEnabled = false;
+      stopDriftTimer(store);
+      const el = document.getElementById(idPrefix + 'drift-toggle');
+      if (el) el.checked = false;
+      anyWasOn = true;
+    }
+    if (store.autoRecoverEnabled) {
+      store.autoRecoverEnabled = false;
+      disableAutoRecoverTimers(topo);
+      const el = document.getElementById(idPrefix + 'auto-recover-toggle');
+      if (el) el.checked = false;
+      anyWasOn = true;
+    }
+    if (store.showPeriodicLog) {
+      store.showPeriodicLog = false;
+      const el = document.getElementById(idPrefix + 'periodic-log-toggle');
+      if (el) el.checked = false;
+      anyWasOn = true;
+    }
+    if (store.coldStart) {
+      store.coldStart = false;
+      const el = document.getElementById(idPrefix + 'coldstart-toggle');
+      if (el) el.checked = false;
+      anyWasOn = true;
+    }
+    return anyWasOn;
+  }
+
+  function applyModeAdjustment(store, topo, simple, idPrefix, logFn, rerender) {
+    store.simpleMode = simple;
+    if (simple) {
+      topo.links.forEach((l) => {
+        if (l.routable) {
+          l._rememberedBaseCost = l.baseCost;
+          l.baseCost = 1;
+          l.load = 0;
+          recalcLinkCost(l);
+        }
+      });
+      if (store.meshEnabled) {
+        removeMeshLinks(topo);
+        store.meshEnabled = false;
+        const meshEl = document.getElementById(idPrefix + 'mesh-toggle');
+        if (meshEl) meshEl.checked = false;
+        logFn('sys', 'メッシュ接続は詳細モード専用の機能のため、簡易モードでは無効にしました（RT-A—RT-B等のリンクを削除しました）');
+      }
+      const turnedOff = autoDisableAdvancedFeatures(store, topo, idPrefix);
+      if (turnedOff) logFn('sys', '詳細モード専用の機能（コスト自動変動・自動復帰・定期交換ログ・収束をゼロから見る）を停止しました');
+    } else {
+      topo.links.forEach((l) => {
+        if (l.routable && l._rememberedBaseCost != null) {
+          l.baseCost = l._rememberedBaseCost;
+          recalcLinkCost(l);
+        }
+      });
+    }
+    topo.rvInfinity = simple ? SIMPLE_MODE_INFINITY : RV_INFINITY_DEFAULT;
+    rvTriggerUpdate(topo, store, logFn, rerender);
+    rerender();
+  }
+
   function initModeToggle() {
     const toggle = document.getElementById('advanced-mode-toggle');
     if (!toggle) return;
     toggle.addEventListener('change', (e) => {
       const advanced = e.target.checked;
       document.body.classList.toggle('mode-advanced', advanced);
-      Fixed.simpleMode = !advanced;
-      Free.simpleMode = !advanced;
-      fixedResetToInitial(true);
-      freeResetToInitial(true, true);
-      const msg = advanced ? '詳細モードに切り替えました（状態を初期化しました）' : '簡易モードに切り替えました（状態を初期化しました）';
+      applyModeAdjustment(Fixed, Fixed.topo, !advanced, '', fixedLog, fixedRender);
+      applyModeAdjustment(Free, Free.topo, !advanced, 'free-', freeLog, freeRender);
+      const msg = advanced ? '詳細モードに切り替えました（ネットワークの構成はそのまま維持されます）' : '簡易モードに切り替えました（ネットワークの構成はそのまま維持されます）';
       fixedLog('sys', msg);
       freeLog('sys', msg);
     });

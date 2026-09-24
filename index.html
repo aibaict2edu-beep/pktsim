@@ -207,6 +207,9 @@
         </div>
         <button class="btn btn-ghost" id="free-undo" disabled>↺ 元に戻す</button>
         <button class="btn btn-ghost" id="free-redo" disabled>↻ やり直す</button>
+        <button class="btn btn-ghost" id="free-save">💾 保存</button>
+        <button class="btn btn-ghost" id="free-load">📂 読込</button>
+        <input type="file" id="free-load-input" accept="application/json" class="visually-hidden">
         <button class="btn btn-ghost" id="free-clear">全消去</button>
       </div>
 
@@ -250,8 +253,11 @@
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cost-modal-title">
     <h3 id="cost-modal-title">リンクのコスト設定</h3>
     <p class="modal-sub" id="cost-modal-sub"></p>
-    <label class="field-label" for="cost-input">メトリック（コスト）</label>
-    <input type="number" id="cost-input" class="cost-input" min="1" max="99" value="1">
+    <div id="cost-metric-block">
+      <label class="field-label" for="cost-input">メトリック（コスト）</label>
+      <input type="number" id="cost-input" class="cost-input" min="1" max="99" value="1">
+    </div>
+    <p class="modal-note is-hidden" id="cost-metric-note"></p>
     <label class="modal-check">
       <input type="checkbox" id="cost-down-check">
       このリンクを障害（ダウン）状態にする
@@ -273,8 +279,8 @@
       <section class="help-section">
         <h4>使い方</h4>
         <p><strong>凡例</strong>：実線が動く色付きの線＝データの送信、紫や水色の小さな粒（パルス）＝ルーター同士の経路情報のやりとりです。</p>
-        <p><strong>簡易モード（デフォルト）</strong>：情報Ⅰのルーティング学習向け。リンクのコストはすべて1、16ホップ先まで届かなければ「到達不能」になります。送信・リンク障害・ルーティングテーブルの確認だけに絞った画面です。</p>
-        <p><strong>詳細モード</strong>：右上の「詳細モード」をONにすると、コストを自由に設定できるほか、メッシュ接続・時間経過によるコスト変動や障害・収束の観察・定期交換ログなど、発展的な機能が使えます。到達不能の基準もコスト50に変わります。</p>
+        <p><strong>簡易モード（デフォルト）</strong>：情報Ⅰのルーティング学習向け。リンクのコストはすべて1、16ホップ先まで届かなければ「到達不能」になります。送信・リンク障害・ルーティングテーブルの確認だけに絞った画面です。<strong>メッシュ接続・時間経過の変化・収束の観察などの発展的な機能は使えません</strong>（詳細モードに切り替えると使えるようになります）。</p>
+        <p><strong>詳細モード</strong>：右上の「詳細モード」をONにすると、コストを自由に設定できるほか、メッシュ接続・時間経過によるコスト変動や障害・収束の観察・定期交換ログなど、発展的な機能が使えます。到達不能の基準もコスト50に変わります。モードを切り替えてもネットワークの構成(ノード・IP設定・接続)はそのまま維持されます。簡易モードに切り替えると、コストは1に統一され（詳細モードに戻すと元の値に復元されます）、メッシュ接続は自動的に解除されます。</p>
         <p><strong>固定トポロジ</strong>：あらかじめ用意されたネットワーク構成で送信を試せます。ルーターをクリック（スマホは長押し）するとそのルーターの持つルーティングテーブルを確認できます。</p>
         <p><strong>自由配置</strong>：PC・スイッチ・ルーターを自分で配置し、線でつないでネットワークを組み立てられます。PCやルーターをクリック（スマホは長押し）するとIPアドレスやデフォルトゲートウェイを設定できます。「接続」モードでノードを2つ順にクリックするとリンクを作成、「削除」モードでクリックすると削除、Ctrl+Z/Ctrl+Yで元に戻す・やり直すができます。</p>
       </section>
