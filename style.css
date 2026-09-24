@@ -361,7 +361,7 @@ input[type="range"]{
 .ip-popover{
   position: absolute;
   z-index: 20;
-  width: 260px;
+  width: 300px;
   max-height: 420px;
   overflow-y: auto;
   background: var(--panel-raised);
@@ -415,7 +415,7 @@ input[type="range"]{
   font-family: var(--font-mono);
   font-size: 11.5px;
 }
-.iface-row input.mask-input{ flex: 0 0 88px; }
+.iface-row input.mask-input{ flex: 0 0 130px; }
 .iface-row input.has-error{ border-color: var(--danger); box-shadow: 0 0 0 1px var(--danger); }
 .iface-error-msg{
   margin-top: 4px;

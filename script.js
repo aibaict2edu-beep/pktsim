@@ -1617,7 +1617,7 @@
     pop.style.maxHeight = '420px';
     const popRect = pop.getBoundingClientRect();
     const popHeight = popRect.height || 300;
-    const popWidth = popRect.width || 260;
+    const popWidth = popRect.width || 300;
 
     let left = relX + 36;
     left = clamp(left, 8, Math.max(8, wrapRect.width - popWidth - 8));
