@@ -1922,6 +1922,7 @@
     linkFirstPick: null,
     hoverNodeId: null,
     usedNumbers: { pc: new Set(), switch: new Set(), router: new Set() },
+    nextSlotIndex: 0,
     placeCursor: { x: 140, y: 120 },
     dragging: null,
     flows: [],
@@ -2419,11 +2420,12 @@
     } else if (type === 'router') {
       node.ifaces = {}; // linkId -> {ip, mask}
     }
-    // カスケード配置（重なり回避の簡易ロジック）
+    // カスケード配置：削除しても既存ノードと重ならないよう、増え続けるスロット番号を使う（再利用しない）
     const cols = 6;
-    const idx = Free.topo.nodes.size;
-    node.x = 140 + (idx % cols) * 160;
-    node.y = 100 + Math.floor(idx / cols) * 150;
+    const slot = Free.nextSlotIndex;
+    Free.nextSlotIndex += 1;
+    node.x = 140 + (slot % cols) * 160;
+    node.y = 100 + Math.floor(slot / cols) * 150;
     Free.topo.nodes.set(id, node);
     freeRevalidateAndRender();
     freePopulateSelects();
@@ -2681,6 +2683,7 @@
     Free.topo.nodes.clear();
     Free.topo.links = [];
     Free.usedNumbers = { pc: new Set(), switch: new Set(), router: new Set() };
+    Free.nextSlotIndex = 0;
     Free.flows = [];
     Free.pulses = [];
     Free.nodeFlashes = [];
