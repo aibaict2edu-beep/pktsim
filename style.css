@@ -359,8 +359,8 @@ input[type="range"]{
 /* ---------------------------------------------------- ip popover (自由配置) */
 
 .ip-popover{
-  position: absolute;
-  z-index: 20;
+  position: fixed;
+  z-index: 40;
   width: 300px;
   max-height: 420px;
   overflow-y: auto;

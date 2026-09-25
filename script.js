@@ -1616,40 +1616,36 @@
   // ポップオーバーの表示位置を計算する共通処理。
   // 画面下にはみ出す場合はノードの上側に開き、それでも入らない場合は内部スクロールに任せる。
   function positionPopoverGeneric(pop, wrap, screenX, screenY) {
-    const wrapRect = wrap.getBoundingClientRect();
-
-    // サイズを測るため、視覚的には隠したまま一時的に表示する
-    pop.style.visibility = 'hidden';
-    pop.classList.remove('is-hidden');
-    pop.style.maxHeight = '420px';
-    const popRect = pop.getBoundingClientRect();
-    const popHeight = popRect.height || 300;
-    const popWidth = popRect.width || 300;
-
+    // position:fixed のため、以降はすべてブラウザの画面座標（スクロールに影響されない）だけで計算する
     const margin = 8;
 
-    // --- 横方向：ブラウザの表示領域（ビューポート）を基準に計算する ---
-    let screenLeft = screenX + 36;
-    screenLeft = clamp(screenLeft, margin, Math.max(margin, window.innerWidth - popWidth - margin));
+    // 真の中身の高さを測るため、上限なしで一時的に表示する
+    pop.style.visibility = 'hidden';
+    pop.classList.remove('is-hidden');
+    pop.style.maxHeight = 'none';
+    const naturalHeight = pop.getBoundingClientRect().height || 300;
+    const popWidth = pop.getBoundingClientRect().width || 300;
 
-    // --- 縦方向：ノードの上下どちらに開くか、ビューポート基準の余白で判定する ---
-    const viewportSpaceBelow = window.innerHeight - (screenY - 20);
-    const viewportSpaceAbove = screenY - 20;
-    let screenTop;
-    if (viewportSpaceBelow >= popHeight + margin || viewportSpaceAbove < popHeight) {
-      screenTop = screenY - 20; // 下に開く（十分な余白がある、または上でも入りきらない場合）
+    // 横方向
+    let left = screenX + 36;
+    left = clamp(left, margin, Math.max(margin, window.innerWidth - popWidth - margin));
+
+    // 縦方向：画面の上下どちらに開くかを、実際の中身の高さで判定する
+    const spaceBelow = window.innerHeight - (screenY - 20) - margin;
+    const spaceAbove = screenY - 20 - margin;
+    let top;
+    if (naturalHeight <= spaceBelow || spaceBelow >= spaceAbove) {
+      top = screenY - 20; // 下に開く
     } else {
-      screenTop = screenY - popHeight + 20; // 上に開く
+      top = screenY - naturalHeight + 20; // 上に開く
     }
-    screenTop = clamp(screenTop, margin, Math.max(margin, window.innerHeight - margin - Math.min(popHeight, 160)));
+    top = clamp(top, margin, Math.max(margin, window.innerHeight - margin - Math.min(naturalHeight, 160)));
 
-    // 実際に開始する位置から、画面の下端までに残っている高さだけを上限にする
-    const maxAllowed = Math.max(160, window.innerHeight - screenTop - margin);
-    pop.style.maxHeight = maxAllowed + 'px';
-
-    // wrap（position:relative の親要素）基準の座標に変換して配置する
-    pop.style.left = (screenLeft - wrapRect.left) + 'px';
-    pop.style.top = (screenTop - wrapRect.top) + 'px';
+    // 開始位置から画面下端までの残りだけを、最終的な最大高さにする
+    const maxAllowed = Math.max(160, window.innerHeight - top - margin);
+    pop.style.maxHeight = Math.min(naturalHeight, maxAllowed) + 'px';
+    pop.style.left = left + 'px';
+    pop.style.top = top + 'px';
     pop.style.visibility = '';
   }
 
