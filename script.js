@@ -1652,7 +1652,7 @@
     const topUpper = Math.max(topLower, Math.min(wrapRect.height - 20, maxTopForViewport));
     top = clamp(top, topLower, Math.max(topLower, topUpper));
 
-    const maxAllowed = Math.min(420, Math.max(160, window.innerHeight - viewportMargin * 2));
+    const maxAllowed = Math.max(160, window.innerHeight - (wrapRect.top + top) - viewportMargin);
     pop.style.maxHeight = maxAllowed + 'px';
     pop.style.left = left + 'px';
     pop.style.top = top + 'px';
