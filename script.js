@@ -1617,8 +1617,6 @@
   // 画面下にはみ出す場合はノードの上側に開き、それでも入らない場合は内部スクロールに任せる。
   function positionPopoverGeneric(pop, wrap, screenX, screenY) {
     const wrapRect = wrap.getBoundingClientRect();
-    const relX = screenX - wrapRect.left;
-    const relY = screenY - wrapRect.top;
 
     // サイズを測るため、視覚的には隠したまま一時的に表示する
     pop.style.visibility = 'hidden';
@@ -1628,34 +1626,30 @@
     const popHeight = popRect.height || 300;
     const popWidth = popRect.width || 300;
 
-    // ブラウザの表示領域（実際に見えている範囲）を基準にした上限・下限も併せて考慮する
-    const viewportMargin = 8;
-    const minLeftForViewport = viewportMargin - wrapRect.left;
-    const maxLeftForViewport = window.innerWidth - viewportMargin - wrapRect.left - popWidth;
-    const minTopForViewport = viewportMargin - wrapRect.top;
-    const maxTopForViewport = window.innerHeight - viewportMargin - wrapRect.top - popHeight;
+    const margin = 8;
 
-    let left = relX + 36;
-    const leftLower = Math.min(8, minLeftForViewport);
-    const leftUpper = Math.max(leftLower, Math.min(wrapRect.width - popWidth - 8, maxLeftForViewport));
-    left = clamp(left, leftLower, Math.max(leftLower, leftUpper));
+    // --- 横方向：ブラウザの表示領域（ビューポート）を基準に計算する ---
+    let screenLeft = screenX + 36;
+    screenLeft = clamp(screenLeft, margin, Math.max(margin, window.innerWidth - popWidth - margin));
 
-    const spaceBelow = wrapRect.height - (relY - 20);
-    const spaceAbove = relY - 20;
-    let top;
-    if (spaceBelow >= popHeight + 8 || spaceAbove < popHeight) {
-      top = relY - 20; // 下に開く（十分な余白がある、または上でも入りきらない場合）
+    // --- 縦方向：ノードの上下どちらに開くか、ビューポート基準の余白で判定する ---
+    const viewportSpaceBelow = window.innerHeight - (screenY - 20);
+    const viewportSpaceAbove = screenY - 20;
+    let screenTop;
+    if (viewportSpaceBelow >= popHeight + margin || viewportSpaceAbove < popHeight) {
+      screenTop = screenY - 20; // 下に開く（十分な余白がある、または上でも入りきらない場合）
     } else {
-      top = relY - popHeight + 20; // 上に開く
+      screenTop = screenY - popHeight + 20; // 上に開く
     }
-    const topLower = Math.min(8, minTopForViewport);
-    const topUpper = Math.max(topLower, Math.min(wrapRect.height - 20, maxTopForViewport));
-    top = clamp(top, topLower, Math.max(topLower, topUpper));
+    screenTop = clamp(screenTop, margin, Math.max(margin, window.innerHeight - margin - Math.min(popHeight, 160)));
 
-    const maxAllowed = Math.max(160, window.innerHeight - (wrapRect.top + top) - viewportMargin);
+    // 実際に開始する位置から、画面の下端までに残っている高さだけを上限にする
+    const maxAllowed = Math.max(160, window.innerHeight - screenTop - margin);
     pop.style.maxHeight = maxAllowed + 'px';
-    pop.style.left = left + 'px';
-    pop.style.top = top + 'px';
+
+    // wrap（position:relative の親要素）基準の座標に変換して配置する
+    pop.style.left = (screenLeft - wrapRect.left) + 'px';
+    pop.style.top = (screenTop - wrapRect.top) + 'px';
     pop.style.visibility = '';
   }
 
