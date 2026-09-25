@@ -938,6 +938,7 @@
   }
 
   function markLinkUsed(topology, fromId, toId) {
+    if (topology.rvInfinity === SIMPLE_MODE_INFINITY) return; // 簡易モードはコストを1に固定し、利用率による変動をさせない
     const link = findLinkBetween(topology, fromId, toId);
     if (link && link.routable) {
       link.load = (link.load || 0) + LINK_LOAD_PER_USE;
