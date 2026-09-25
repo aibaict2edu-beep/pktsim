@@ -688,8 +688,8 @@
         const bw = l.down ? 52 : 26;
         const bh = l.down ? 20 : 21;
         const labelY = l.down ? my : my - 14; // コスト値は上にずらす。DOWNは位置そのまま
-        html += `<rect class="link-cost-bg" x="${mx - bw / 2}" y="${labelY - bh / 2}" width="${bw}" height="${bh}" rx="3"></rect>`;
-        html += `<text class="link-cost${l.down ? ' is-down' : ''}" x="${mx}" y="${labelY + 5}" text-anchor="middle">${label}</text>`;
+        html += `<rect class="link-cost-bg" data-link-id="${l.id}" style="cursor:${clickable ? 'pointer' : 'default'}" x="${mx - bw / 2}" y="${labelY - bh / 2}" width="${bw}" height="${bh}" rx="3"></rect>`;
+        html += `<text class="link-cost${l.down ? ' is-down' : ''}" data-link-id="${l.id}" style="cursor:${clickable ? 'pointer' : 'default'}" x="${mx}" y="${labelY + 5}" text-anchor="middle">${label}</text>`;
       }
     });
 
@@ -701,9 +701,10 @@
       const size = nodeSize(n.type);
       const isRouter = n.type === 'router';
       const isSelected = state.selectedNodeId === n.id;
+      const isMultiSelected = state.multiSelectedIds && state.multiSelectedIds.has(n.id);
       const isHover = state.hoverNodeId === n.id;
       const hasError = state.errorNodeIds && state.errorNodeIds.has(n.id);
-      let boxCls = 'n-box' + (isRouter ? ' is-router' : '') + (isHover ? ' is-hover' : '') + (hasError ? ' has-error' : '');
+      let boxCls = 'n-box' + (isRouter ? ' is-router' : '') + (isHover ? ' is-hover' : '') + (hasError ? ' has-error' : '') + (isMultiSelected ? ' is-multi-selected' : '');
       let groupCls = state.freeMode ? 'free-node' : 'topo-node';
       if (isSelected) groupCls += ' is-selected';
       const title = `${n.name}${n.ip ? '\n' + n.ip : ''}${n.mac ? '\n' + n.mac : ''}`;
@@ -716,6 +717,15 @@
         ${hasError ? `<g class="n-error-badge" transform="translate(${size.w / 2 - 2},${-size.h / 2 + 2})"><circle r="11"></circle><text y="5">!</text></g>` : ''}
       </g>`;
     });
+
+    // 範囲選択中の矩形
+    if (state.marquee) {
+      const mx = Math.min(state.marquee.x1, state.marquee.x2);
+      const my = Math.min(state.marquee.y1, state.marquee.y2);
+      const mw = Math.abs(state.marquee.x2 - state.marquee.x1);
+      const mh = Math.abs(state.marquee.y2 - state.marquee.y1);
+      html += `<rect class="selection-marquee" x="${mx}" y="${my}" width="${mw}" height="${mh}"></rect>`;
+    }
 
     // 転送中パケットのアイコン（フローラインの一番上に表示）
     html += renderPacketIcons(topology, state.flows);
@@ -1969,6 +1979,10 @@
     hoverNodeId: null,
     usedNumbers: { pc: new Set(), switch: new Set(), router: new Set() },
     nextSlotIndex: 0,
+    selectedNodeIds: new Set(),
+    marquee: null,
+    groupDragging: null,
+    marqueeJustFinished: false,
     placeCursor: { x: 140, y: 120 },
     dragging: null,
     flows: [],
@@ -2473,11 +2487,84 @@
     freeLog('sys', `${name} を追加しました`);
   }
 
+  // ゲートウェイ役のルーターから、指定したセグメントへ直結しているルーターを探す
+  function freeFindEntryRouterForSegment(topo, segRepId) {
+    let found = null;
+    topo.nodes.forEach((n) => {
+      if (found || n.type !== 'router') return;
+      if (rvIsDirectlyConnected(topo, n.id, segRepId)) found = n.id;
+    });
+    return found;
+  }
+
+  function freeRenderRouteCompare() {
+    const wrap = document.getElementById('free-route-compare');
+    if (!wrap) return;
+    const srcSel = document.getElementById('free-src-pc');
+    const dstSel = document.getElementById('free-dst-pc');
+    const srcId = srcSel ? srcSel.value : '';
+    const dstId = dstSel ? dstSel.value : '';
+    const note = (msg) => { wrap.innerHTML = `<p class="empty-note">${msg}</p>`; };
+
+    if (!srcId || !dstId) { note('送信元・宛先のPCを選ぶと、ここに経路の候補が表示されます。'); return; }
+    if (srcId === dstId) { note('送信元と宛先が同じです。'); return; }
+    const src = Free.topo.nodes.get(srcId);
+    const dst = Free.topo.nodes.get(dstId);
+    if (!src || !dst) { note('ノードが見つかりません。'); return; }
+    if (!src.gateway) { note('送信元PCにデフォルトゲートウェイが設定されていません。'); return; }
+    const gwNode = findRouterByIp(Free.topo, src.gateway);
+    if (!gwNode) { note('デフォルトゲートウェイに該当するルーターが見つかりません。'); return; }
+
+    const segments = computeNetworkSegments(Free.topo);
+    const dstSeg = segmentForNode(segments, dstId);
+    if (!dstSeg) { note('宛先PCの所属ネットワークを特定できません（IP設定をご確認ください）。'); return; }
+
+    if (rvIsDirectlyConnected(Free.topo, gwNode.id, dstId)) {
+      note('送信元と宛先は同じゲートウェイの配下にあります（ルーターを経由しないため、比較対象の経路はありません）。');
+      return;
+    }
+    const dstRouterId = freeFindEntryRouterForSegment(Free.topo, dstSeg.repId);
+    if (!dstRouterId) { note('宛先ネットワークに接続しているルーターが見つかりません。'); return; }
+    if (dstRouterId === gwNode.id) {
+      note('送信元と宛先は同じルーターに直結しています（経路の分岐はありません）。');
+      return;
+    }
+
+    const all = enumerateRouterPaths(Free.topo, gwNode.id, dstRouterId);
+    if (!all.length) { note('ルーター間の経路が見つかりません。'); return; }
+    all.forEach((p) => { p.effCost = p.down ? Infinity : p.cost; });
+    all.sort((a, b) => a.effCost - b.effCost);
+    const top = [];
+    let cutoff = null;
+    for (let i = 0; i < all.length; i++) {
+      if (top.length < 5) {
+        top.push(all[i]);
+        if (top.length === 5) cutoff = all[i].effCost;
+      } else if (all[i].effCost === cutoff) {
+        top.push(all[i]);
+      } else {
+        break;
+      }
+    }
+    wrap.innerHTML = '';
+    top.forEach((p, idx) => {
+      const row = el('div', 'route-row');
+      const label = p.path.map((id) => { const n = Free.topo.nodes.get(id); return n ? n.name : id; }).join('→');
+      if (p.down) row.classList.add('is-unavailable');
+      row.innerHTML = `<span class="route-tag">${idx + 1}</span>
+        <span>${label}</span>
+        <span class="route-cost">${p.down ? '不通' : 'コスト ' + p.cost}</span>`;
+      wrap.appendChild(row);
+    });
+  }
+
   function freeRenderSvg() {
     renderTopology(Free.svg, Free.topo, {
       freeMode: true,
       hoverNodeId: Free.hoverNodeId,
       selectedNodeId: Free.linkFirstPick,
+      multiSelectedIds: Free.selectedNodeIds,
+      marquee: Free.marquee,
       flows: Free.flows,
       pulses: Free.pulses,
       nodeFlashes: Free.nodeFlashes,
@@ -2488,6 +2575,7 @@
 
   function freeRender() {
     freeRenderSvg();
+    freeRenderRouteCompare();
     if (Free.openPopoverNodeId) {
       const n = Free.topo.nodes.get(Free.openPopoverNodeId);
       if (n) renderIpPopoverContent(n); else closeIpPopover();
@@ -2775,6 +2863,9 @@
     };
     Free.nextSlotIndex = data.nextSlotIndex != null ? data.nextSlotIndex : Free.topo.nodes.size;
     Free.ifaceCounter = data.ifaceCounter || 0;
+    Free.selectedNodeIds = new Set();
+    Free.marquee = null;
+    Free.groupDragging = null;
     Free.flows = [];
     Free.pulses = [];
     Free.nodeFlashes = [];
@@ -2826,6 +2917,9 @@
     Free.topo.links = [];
     Free.usedNumbers = { pc: new Set(), switch: new Set(), router: new Set() };
     Free.nextSlotIndex = 0;
+    Free.selectedNodeIds = new Set();
+    Free.marquee = null;
+    Free.groupDragging = null;
     Free.flows = [];
     Free.pulses = [];
     Free.nodeFlashes = [];
@@ -2894,10 +2988,23 @@
       e.target.value = ''; // 同じファイルを連続で選んでも change が発火するように
     });
     document.getElementById('free-clear').addEventListener('click', () => {
+      if (!window.confirm('現在のネットワーク構成をすべて消去します。よろしいですか？（Ctrl+Zで元に戻すこともできます）')) return;
       freePushUndo();
       freeResetToInitial(false, false);
     });
+    document.getElementById('free-reset-links').addEventListener('click', () => {
+      Free.topo.links.forEach((l) => { setLinkDownState(Free, Free.topo, l, false, freeLog, freeRender); });
+      freeLog('sys', 'すべてのリンクを復旧しました');
+      freeRender();
+    });
+    document.getElementById('free-clear-trails').addEventListener('click', () => {
+      Free.flows = [];
+      freeLog('sys', 'パケットの軌跡をクリアしました');
+      freeRender();
+    });
     document.getElementById('free-send-btn').addEventListener('click', freeSend);
+    document.getElementById('free-src-pc').addEventListener('change', freeRenderRouteCompare);
+    document.getElementById('free-dst-pc').addEventListener('change', freeRenderRouteCompare);
     document.getElementById('free-undo').addEventListener('click', freeUndo);
     document.getElementById('free-redo').addEventListener('click', freeRedo);
     document.addEventListener('keydown', (e) => {
@@ -2957,10 +3064,14 @@
     // クリック（ノード／リンク）
     Free.svg.addEventListener('click', (e) => {
       if (Free.dragging && Free.dragging.moved) return; // ドラッグ直後のクリックは無視
+      if (Free.groupDragging && Free.groupDragging.moved) return;
+      if (Free.marqueeJustFinished) { Free.marqueeJustFinished = false; return; }
       const nodeTarget = e.target.closest('[data-node-id]');
       if (nodeTarget) { freeHandleNodeClick(nodeTarget.dataset.nodeId); return; }
       const linkTarget = e.target.closest('[data-link-id]');
       if (linkTarget) { freeHandleLinkClick(linkTarget.dataset.linkId); return; }
+      // 何もない場所をクリック＝選択解除
+      if (Free.selectedNodeIds.size) { Free.selectedNodeIds = new Set(); freeRender(); }
     });
 
     // 右クリックはモードに関係なく常に設定を確認できる（進行中の接続選択などは維持したまま）
@@ -3002,18 +3113,54 @@
       if (id !== Free.hoverNodeId) { Free.hoverNodeId = id; freeRender(); }
     });
 
-    // ドラッグ移動（moveモードのみ）
+    // ドラッグ移動・範囲選択（moveモードのみ）
     Free.svg.addEventListener('mousedown', (e) => {
       if (Free.interactionMode !== 'move') return;
       const nodeTarget = e.target.closest('[data-node-id]');
-      if (!nodeTarget) return;
-      const id = nodeTarget.dataset.nodeId;
-      const node = Free.topo.nodes.get(id);
       const start = svgPointFromEvent(Free.svg, e);
-      Free.dragging = { id, offX: node.x - start.x, offY: node.y - start.y, moved: false };
-      nodeTarget.classList.add('is-dragging');
+      if (nodeTarget) {
+        const id = nodeTarget.dataset.nodeId;
+        if (Free.selectedNodeIds.size > 1 && Free.selectedNodeIds.has(id)) {
+          // 選択済みノードの1つをつかんだ → まとめてドラッグ
+          const offsets = new Map();
+          Free.selectedNodeIds.forEach((nid) => {
+            const n = Free.topo.nodes.get(nid);
+            if (n) offsets.set(nid, { x: n.x - start.x, y: n.y - start.y });
+          });
+          Free.groupDragging = { offsets, moved: false };
+          return;
+        }
+        // 通常の単一ノードドラッグ：選択状態はクリア
+        if (Free.selectedNodeIds.size) { Free.selectedNodeIds = new Set(); }
+        const node = Free.topo.nodes.get(id);
+        Free.dragging = { id, offX: node.x - start.x, offY: node.y - start.y, moved: false };
+        nodeTarget.classList.add('is-dragging');
+        return;
+      }
+      // 何もない場所からドラッグ＝範囲選択の開始
+      Free.marquee = { x1: start.x, y1: start.y, x2: start.x, y2: start.y };
     });
     window.addEventListener('mousemove', (e) => {
+      if (Free.marquee) {
+        const p = svgPointFromEvent(Free.svg, e);
+        Free.marquee.x2 = p.x;
+        Free.marquee.y2 = p.y;
+        freeRenderSvg();
+        return;
+      }
+      if (Free.groupDragging) {
+        const p = svgPointFromEvent(Free.svg, e);
+        Free.groupDragging.moved = true;
+        Free.groupDragging.offsets.forEach((off, nid) => {
+          const n = Free.topo.nodes.get(nid);
+          if (n) {
+            n.x = clamp(p.x + off.x, 30, 1090);
+            n.y = clamp(p.y + off.y, 30, 530);
+          }
+        });
+        freeRenderSvg();
+        return;
+      }
       if (!Free.dragging) return;
       const node = Free.topo.nodes.get(Free.dragging.id);
       if (!node) return;
@@ -3025,6 +3172,19 @@
       if (Free.openPopoverNodeId === node.id) positionIpPopover(node);
     });
     window.addEventListener('mouseup', () => {
+      if (Free.marquee) {
+        const x1 = Math.min(Free.marquee.x1, Free.marquee.x2), x2 = Math.max(Free.marquee.x1, Free.marquee.x2);
+        const y1 = Math.min(Free.marquee.y1, Free.marquee.y2), y2 = Math.max(Free.marquee.y1, Free.marquee.y2);
+        const selected = new Set();
+        Free.topo.nodes.forEach((n) => {
+          if (n.x >= x1 && n.x <= x2 && n.y >= y1 && n.y <= y2) selected.add(n.id);
+        });
+        Free.marquee = null;
+        Free.selectedNodeIds = selected;
+        Free.marqueeJustFinished = true;
+        freeRender();
+      }
+      if (Free.groupDragging) setTimeout(() => { Free.groupDragging = null; }, 0);
       if (Free.dragging) setTimeout(() => { Free.dragging = null; }, 0);
     });
 

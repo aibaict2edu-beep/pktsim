@@ -207,6 +207,8 @@
         </div>
         <button class="btn btn-ghost" id="free-undo" disabled>↺ 元に戻す</button>
         <button class="btn btn-ghost" id="free-redo" disabled>↻ やり直す</button>
+        <button class="btn btn-warning" id="free-reset-links">全リンク復旧</button>
+        <button class="btn btn-ghost" id="free-clear-trails">軌跡クリア</button>
         <button class="btn btn-ghost" id="free-save">💾 保存</button>
         <button class="btn btn-ghost" id="free-load">📂 読込</button>
         <input type="file" id="free-load-input" accept="application/json" class="visually-hidden">
@@ -234,6 +236,13 @@
         </div>
         <button class="btn btn-primary" id="free-send-btn">パケットを送信</button>
         <p class="micro-hint" id="free-send-status"></p>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">経路コスト比較</h2>
+        <div id="free-route-compare" class="route-compare">
+          <p class="empty-note">送信元・宛先のPCを選ぶと、ここに経路の候補が表示されます。</p>
+        </div>
       </section>
 
       <section class="card card-grow">

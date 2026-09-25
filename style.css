@@ -561,6 +561,14 @@ input[type="range"]{
 
 /* node error indicator */
 .n-box.has-error{ stroke: var(--danger) !important; stroke-width: 2; }
+.n-box.is-multi-selected{ stroke: var(--accent) !important; stroke-width: 2.5; }
+.selection-marquee{
+  fill: var(--accent-glow);
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
 .n-error-badge{ pointer-events:none; animation: error-badge-blink 1s ease-in-out infinite; }
 .n-error-badge circle{ fill: var(--danger); stroke: var(--panel); stroke-width: 2; }
 .n-error-badge text{ fill:#fff; font-size: 14px; font-weight:700; text-anchor:middle; font-family: var(--font-ui); }
