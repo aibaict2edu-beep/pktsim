@@ -1621,7 +1621,6 @@
     const relY = screenY - wrapRect.top;
 
     // サイズを測るため、視覚的には隠したまま一時的に表示する
-    const wasHidden = pop.classList.contains('is-hidden');
     pop.style.visibility = 'hidden';
     pop.classList.remove('is-hidden');
     pop.style.maxHeight = '420px';
@@ -1629,8 +1628,17 @@
     const popHeight = popRect.height || 300;
     const popWidth = popRect.width || 300;
 
+    // ブラウザの表示領域（実際に見えている範囲）を基準にした上限・下限も併せて考慮する
+    const viewportMargin = 8;
+    const minLeftForViewport = viewportMargin - wrapRect.left;
+    const maxLeftForViewport = window.innerWidth - viewportMargin - wrapRect.left - popWidth;
+    const minTopForViewport = viewportMargin - wrapRect.top;
+    const maxTopForViewport = window.innerHeight - viewportMargin - wrapRect.top - popHeight;
+
     let left = relX + 36;
-    left = clamp(left, 8, Math.max(8, wrapRect.width - popWidth - 8));
+    const leftLower = Math.min(8, minLeftForViewport);
+    const leftUpper = Math.max(leftLower, Math.min(wrapRect.width - popWidth - 8, maxLeftForViewport));
+    left = clamp(left, leftLower, Math.max(leftLower, leftUpper));
 
     const spaceBelow = wrapRect.height - (relY - 20);
     const spaceAbove = relY - 20;
@@ -1640,14 +1648,15 @@
     } else {
       top = relY - popHeight + 20; // 上に開く
     }
-    top = clamp(top, 8, Math.max(8, wrapRect.height - 20));
+    const topLower = Math.min(8, minTopForViewport);
+    const topUpper = Math.max(topLower, Math.min(wrapRect.height - 20, maxTopForViewport));
+    top = clamp(top, topLower, Math.max(topLower, topUpper));
 
-    const maxAllowed = Math.min(420, Math.max(160, wrapRect.height - 16));
+    const maxAllowed = Math.min(420, Math.max(160, window.innerHeight - viewportMargin * 2));
     pop.style.maxHeight = maxAllowed + 'px';
     pop.style.left = left + 'px';
     pop.style.top = top + 'px';
     pop.style.visibility = '';
-    if (wasHidden) { /* 呼び出し元が直後に is-hidden を外すので、ここでは何もしない */ }
   }
 
   function positionFixedRtPopover(node) {
