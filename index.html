@@ -173,6 +173,16 @@
           <output id="free-fail-rate-out" class="field-value">15%</output>
         </div>
         <button class="btn btn-ghost" id="free-pause-toggle">⏸ 一時停止</button>
+
+        <button class="btn btn-warning" id="free-reset-links">全リンク復旧</button>
+        <button class="btn btn-ghost" id="free-clear-trails">軌跡クリア</button>
+        <button class="btn btn-ghost" id="free-undo" disabled>↺ 元に戻す</button>
+        <button class="btn btn-ghost" id="free-redo" disabled>↻ やり直す</button>
+        <button class="btn btn-ghost" id="free-save">💾 保存</button>
+        <button class="btn btn-ghost" id="free-load">📂 読込</button>
+        <input type="file" id="free-load-input" accept="application/json" class="visually-hidden">
+        <button class="btn btn-ghost" id="free-clear">全消去</button>
+
         <div class="toolbar-group advanced-only">
           <label class="check-label" for="free-drift-toggle">
             <input type="checkbox" id="free-drift-toggle">
@@ -205,14 +215,6 @@
             定期交換ログの表示
           </label>
         </div>
-        <button class="btn btn-ghost" id="free-undo" disabled>↺ 元に戻す</button>
-        <button class="btn btn-ghost" id="free-redo" disabled>↻ やり直す</button>
-        <button class="btn btn-warning" id="free-reset-links">全リンク復旧</button>
-        <button class="btn btn-ghost" id="free-clear-trails">軌跡クリア</button>
-        <button class="btn btn-ghost" id="free-save">💾 保存</button>
-        <button class="btn btn-ghost" id="free-load">📂 読込</button>
-        <input type="file" id="free-load-input" accept="application/json" class="visually-hidden">
-        <button class="btn btn-ghost" id="free-clear">全消去</button>
       </div>
 
       <div class="stage-canvas-wrap">
