@@ -838,6 +838,7 @@ table.rt-tbl input[type="number"]{
   border-radius: var(--radius-s);
   padding: 8px 10px;
 }
+.modal-note.is-hidden{ display:none; }
 .cost-input{
   width: 100%;
   background: var(--panel);
