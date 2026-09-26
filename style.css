@@ -11,6 +11,7 @@
   --text:          #dfe6ee;
   --text-dim:      #93a2b3;
   --text-faint:    #5c6b7d;
+  --strong-label-bg: #000000;
 
   --accent:        #4fd8c4;
   --accent-dim:    #2c6e66;
@@ -38,6 +39,7 @@ body.theme-light{
   --panel:         #ffffff;
   --panel-alt:     #f4f6f8;
   --panel-raised:  #eef1f4;
+  --strong-label-bg: #ffffff;
   --border:        #d7dee5;
   --border-soft:   #e3e8ed;
   --text:          #1d2733;
@@ -455,7 +457,7 @@ input[type="range"]{
   text-anchor: middle;
 }
 .n-sub{
-  fill: var(--text-faint);
+  fill: var(--text);
   font-family: var(--font-mono);
   font-size: 9.5px;
   text-anchor: middle;
@@ -493,12 +495,12 @@ input[type="range"]{
 }
 .link-cost{
   font-family: var(--font-mono);
-  font-size: 15px;
+  font-size: 17px;
   font-weight: 600;
   fill: var(--text-dim);
 }
-.link-cost-bg{ fill: var(--panel); }
-.link-cost.is-down{ fill: var(--danger); font-size: 15px; font-weight: 700; }
+.link-cost-bg{ fill: var(--strong-label-bg); }
+.link-cost.is-down{ fill: var(--danger); font-size: 17px; font-weight: 700; }
 
 .pkt-dot{
   fill: var(--signal);
