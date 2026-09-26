@@ -839,6 +839,7 @@ table.rt-tbl input[type="number"]{
   padding: 8px 10px;
 }
 .modal-note.is-hidden{ display:none; }
+.theme-toggle-label.is-hidden{ display:none; }
 .cost-input{
   width: 100%;
   background: var(--panel);

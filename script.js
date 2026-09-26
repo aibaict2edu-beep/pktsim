@@ -568,6 +568,36 @@
     return topo;
   }
 
+  // 「固定トポロジ（基本）」：PC-1 -- RT-1 -- RT-2 -- PC-2 の一本道（スイッチなし、迂回路なし）
+  function makeBasicTopology() {
+    const nodes = new Map();
+    const links = [];
+    function addNode(id, type, name, ip, mac, x, y, extra) {
+      const node = { id, type, name, ip: ip || null, mac: mac || null, x, y };
+      Object.assign(node, extra || {});
+      if (type === 'router') node.ifaces = {};
+      nodes.set(id, node);
+    }
+    function addLink(id, a, b, cost, routable) {
+      links.push({ id, a, b, cost: cost || 0, baseCost: cost || 0, load: 0, down: false, routable: !!routable });
+    }
+
+    addNode('basic-pc-1', 'pc', 'PC-1', '192.168.1.11', randMac(0x81), 90, 280, { mask: '/24', gateway: '192.168.1.250' });
+    addNode('basic-rt-1', 'router', 'RT-1', '192.168.1.250', randMac(0x82), 420, 280);
+    addNode('basic-rt-2', 'router', 'RT-2', '192.168.2.250', randMac(0x83), 760, 280);
+    addNode('basic-pc-2', 'pc', 'PC-2', '192.168.2.11', randMac(0x84), 1080, 280, { mask: '/24', gateway: '192.168.2.250' });
+
+    addLink('basic-pc1-rt1', 'basic-pc-1', 'basic-rt-1', 0, false);
+    addLink('basic-rt1-rt2', 'basic-rt-1', 'basic-rt-2', 1, true);
+    addLink('basic-rt2-pc2', 'basic-rt-2', 'basic-pc-2', 0, false);
+
+    const topo = { nodes, links, rvInfinity: SIMPLE_MODE_INFINITY };
+    const rt1 = nodes.get('basic-rt-1'), rt2 = nodes.get('basic-rt-2');
+    rt1.ifaces['basic-rt1-rt2'] = { ip: '10.0.0.1', mask: '/24' };
+    rt2.ifaces['basic-rt1-rt2'] = { ip: '10.0.0.2', mask: '/24' };
+    return topo;
+  }
+
   const ROUTE_DEFS = [
     { key: 'A', label: 'ルートA', mid: 'rt-a', seg: ['rt-s_rt-a', 'rt-a_rt-r'] },
     { key: 'B', label: 'ルートB', mid: 'rt-b', seg: ['rt-s_rt-b', 'rt-b_rt-r'] },
@@ -1346,6 +1376,34 @@
    * 6. 固定トポロジ モード
    * ------------------------------------------------------------------ */
 
+  const Basic = {
+    topo: makeBasicTopology(),
+    svg: null,
+    logEl: null,
+    logBadge: null,
+    failRate: 15,
+    hoverNodeId: null,
+    flows: [],
+    colorIdx: 0,
+    driftEnabled: false,
+    driftFailRate: 0,
+    driftTimer: null,
+    openPopoverNodeId: null,
+    autoRecoverEnabled: false,
+    speedFactor: 1,
+    meshEnabled: false,
+    lastChosenPath: null,
+    nodeErrors: new Map(),
+    coldStart: false,
+    rvTimer: null,
+    pulses: [],
+    nodeFlashes: [],
+    arpCache: new Set(),
+    simpleMode: true,
+    paused: false,
+    showPeriodicLog: false
+  };
+
   const Fixed = {
     topo: makeFixedTopology(),
     svg: null,
@@ -1797,6 +1855,220 @@
     startRvTimer(Fixed, Fixed.topo, fixedRender, fixedLog);
     fixedRender();
     if (!silent) fixedLog('sys', '固定トポロジを初期状態に戻しました');
+  }
+
+  /* ------------------------------------------------------------------ *
+   * 1.5 固定トポロジ（基本）：PC-1 -- RT-1 -- RT-2 -- PC-2 の一本道
+   * ------------------------------------------------------------------ */
+
+  function basicLog(level, msg, delay) { makeLogger(Basic.logEl, Basic.logBadge)(level, msg, delay); }
+
+  function basicRender() {
+    renderTopology(Basic.svg, Basic.topo, {
+      hoverNodeId: Basic.hoverNodeId,
+      flows: Basic.flows,
+      pulses: Basic.pulses,
+      nodeFlashes: Basic.nodeFlashes,
+      speedFactor: Basic.speedFactor,
+      errorNodeIds: new Set()
+    });
+    const btn = document.getElementById('basic-send-btn');
+    if (btn) btn.disabled = Basic.paused;
+    if (Basic.openPopoverNodeId) {
+      const n = Basic.topo.nodes.get(Basic.openPopoverNodeId);
+      if (n) renderBasicRtPopoverContent(n); else closeBasicRtPopover();
+    }
+  }
+
+  function basicRoutingTableHtml(router) {
+    const segments = computeNetworkSegments(Basic.topo);
+    const { rows, emptyNote } = computeRoutingTable(Basic.topo, router.id, segments);
+    if (emptyNote && rows.length === 0) return `<p class="popover-note">${emptyNote}</p>`;
+    const body = rows.map((r) => `<tr>
+        <td>${r.network}</td>
+        <td>${r.nextHop}</td>
+        <td>${r.iface}</td>
+        <td class="${r.type === 'unreachable' ? 'rt-down' : ''}">${r.metric}</td>
+      </tr>`).join('');
+    return `<table class="rt-tbl">
+      <tr><th>宛先ネットワーク</th><th>ネクストホップ</th><th>インタフェース</th><th>${metricColumnLabel(true)}</th></tr>
+      ${body}
+    </table>`;
+  }
+
+  function renderBasicRtPopoverContent(node) {
+    const pop = document.getElementById('basic-rt-popover');
+    withFocusPreserved(pop, () => {
+      let ipSection = '<div class="popover-section-title">IPアドレス設定</div>';
+      if (node.ip) ipSection += popoverIfaceBlockHtml(node.type === 'router' ? 'PC側インタフェース' : 'IPアドレス／マスク', node.ip, node.mask || '/24', null, 'top', false);
+      Object.keys(node.ifaces || {}).forEach((linkId) => {
+        const link = Basic.topo.links.find((l) => l.id === linkId);
+        const otherId = link ? (link.a === node.id ? link.b : link.a) : null;
+        const other = otherId ? Basic.topo.nodes.get(otherId) : null;
+        ipSection += popoverIfaceBlockHtml(`→ ${other ? other.name : '?'} 側`, node.ifaces[linkId].ip, node.ifaces[linkId].mask, null, linkId, false);
+      });
+      const rtSection = node.type === 'router'
+        ? `<div class="popover-section-title">ルーティングテーブル</div>${basicRoutingTableHtml(node)}`
+        : '';
+      pop.innerHTML = `<div class="ip-popover-title"><span>${node.name} の設定</span><button type="button" class="ip-popover-close" id="basic-rt-popover-close">×</button></div>${ipSection}${rtSection}`;
+      document.getElementById('basic-rt-popover-close').addEventListener('click', closeBasicRtPopover);
+    });
+  }
+
+  function positionBasicRtPopover(node) {
+    const pop = document.getElementById('basic-rt-popover');
+    const wrap = Basic.svg.closest('.stage-canvas-wrap');
+    if (!node || !wrap) return;
+    const screenPt = svgToScreen(Basic.svg, node.x, node.y);
+    positionPopoverGeneric(pop, wrap, screenPt.x, screenPt.y);
+  }
+
+  function openBasicRtPopover(nodeId) {
+    const node = Basic.topo.nodes.get(nodeId);
+    if (!node) return;
+    Basic.openPopoverNodeId = nodeId;
+    renderBasicRtPopoverContent(node);
+    positionBasicRtPopover(node);
+    document.getElementById('basic-rt-popover').classList.remove('is-hidden');
+  }
+
+  function closeBasicRtPopover() {
+    Basic.openPopoverNodeId = null;
+    document.getElementById('basic-rt-popover').classList.add('is-hidden');
+  }
+
+  function basicSend() {
+    const srcId = 'basic-pc-1', dstId = 'basic-pc-2';
+    const statusEl = document.getElementById('basic-send-status');
+    statusEl.textContent = '送信中…';
+    const sendOpts = {
+      failRate: Basic.failRate,
+      arpCache: Basic.arpCache,
+      markDown: (link) => setLinkDownState(Basic, Basic.topo, link, true, basicLog, basicRender),
+      onLinkDown: () => basicRender(),
+      onRouteComputed: (result) => {
+        if (result.reachable) {
+          startDeliverySession(Basic, Basic.topo, srcId, dstId, basicRender, basicLog, (state) => {
+            statusEl.textContent = state === 'done' ? '送信完了' : '送信失敗（不通）';
+          });
+        } else {
+          statusEl.textContent = '送信失敗（不通）';
+          basicRender();
+        }
+      },
+      onFinish: () => {}
+    };
+    simulateSend(Basic.topo, srcId, dstId, basicLog, Basic.svg, sendOpts);
+  }
+
+  function basicResetToInitial(silent) {
+    stopRvTimer(Basic);
+    Basic.topo.links.forEach((l) => { if (l._recoveryTimer) clearTimeout(l._recoveryTimer); });
+    closeBasicRtPopover();
+    Basic.topo = makeBasicTopology();
+    Basic.flows = [];
+    Basic.pulses = [];
+    Basic.nodeFlashes = [];
+    Basic.arpCache = new Set();
+    Basic.colorIdx = 0;
+    Basic.nodeErrors = new Map();
+    rvInitTables(Basic.topo, computeNetworkSegments(Basic.topo), false);
+    startRvTimer(Basic, Basic.topo, basicRender, basicLog);
+    basicRender();
+    if (!silent) basicLog('sys', '固定トポロジ（基本）を初期状態に戻しました');
+  }
+
+  function initBasicMode() {
+    Basic.svg = document.getElementById('basic-svg');
+    Basic.logEl = document.getElementById('basic-log');
+    Basic.logBadge = document.getElementById('basic-log-badge');
+    rvInitTables(Basic.topo, computeNetworkSegments(Basic.topo), false);
+    startRvTimer(Basic, Basic.topo, basicRender, basicLog);
+    basicRender();
+
+    document.getElementById('basic-send-btn').addEventListener('click', basicSend);
+
+    document.getElementById('basic-fail-rate').addEventListener('input', (e) => {
+      Basic.failRate = Number(e.target.value);
+      document.getElementById('basic-fail-rate-out').textContent = Basic.failRate + '%';
+    });
+
+    document.getElementById('basic-reset-links').addEventListener('click', () => {
+      Basic.topo.links.forEach((l) => { setLinkDownState(Basic, Basic.topo, l, false, basicLog, basicRender); });
+      Basic.flows = [];
+      basicLog('sys', 'すべてのリンクを復旧し、経路のハイライトをリセットしました');
+      basicRender();
+    });
+
+    document.getElementById('basic-reset-all').addEventListener('click', () => {
+      if (window.confirm('固定トポロジ（基本）を初期状態に戻します。よろしいですか？')) basicResetToInitial(false);
+    });
+
+    const basicPauseBtn = document.getElementById('basic-pause-toggle');
+    basicPauseBtn.addEventListener('click', () => {
+      if (Basic.paused) {
+        resumeStore(Basic, Basic.topo, basicRender, basicLog);
+        basicPauseBtn.textContent = '⏸ 一時停止';
+        basicPauseBtn.classList.remove('is-active');
+      } else {
+        pauseStore(Basic);
+        basicPauseBtn.textContent = '▶ 再開';
+        basicPauseBtn.classList.add('is-active');
+      }
+      basicRender();
+    });
+
+    Basic.svg.addEventListener('click', (e) => {
+      const nodeTarget = e.target.closest('[data-node-id]');
+      if (nodeTarget) {
+        const node = Basic.topo.nodes.get(nodeTarget.dataset.nodeId);
+        if (node && node.type === 'router') {
+          if (Basic.openPopoverNodeId === node.id) closeBasicRtPopover(); else openBasicRtPopover(node.id);
+        }
+        return;
+      }
+      const linkTarget = e.target.closest('[data-link-id]');
+      if (linkTarget) {
+        const link = Basic.topo.links.find((l) => l.id === linkTarget.dataset.linkId);
+        if (link && link.routable) setLinkDownState(Basic, Basic.topo, link, !link.down, basicLog, basicRender);
+        return;
+      }
+    });
+    Basic.svg.addEventListener('mousemove', (e) => {
+      const nodeTarget = e.target.closest('[data-node-id]');
+      const id = nodeTarget ? nodeTarget.dataset.nodeId : null;
+      if (id !== Basic.hoverNodeId) { Basic.hoverNodeId = id; basicRender(); }
+    });
+    Basic.svg.addEventListener('contextmenu', (e) => {
+      const nodeTarget = e.target.closest('[data-node-id]');
+      if (!nodeTarget) return;
+      const node = Basic.topo.nodes.get(nodeTarget.dataset.nodeId);
+      if (!node || node.type !== 'router') return;
+      e.preventDefault();
+      openBasicRtPopover(node.id);
+    });
+    let basicLongPressTimer = null;
+    Basic.svg.addEventListener('touchstart', (e) => {
+      const nodeTarget = e.target.closest('[data-node-id]');
+      if (!nodeTarget) return;
+      const nodeId = nodeTarget.dataset.nodeId;
+      basicLongPressTimer = setTimeout(() => {
+        const node = Basic.topo.nodes.get(nodeId);
+        if (node && node.type === 'router') openBasicRtPopover(node.id);
+      }, 550);
+    }, { passive: true });
+    ['touchend', 'touchmove', 'touchcancel'].forEach((evt) => {
+      Basic.svg.addEventListener(evt, () => { clearTimeout(basicLongPressTimer); }, { passive: true });
+    });
+    document.addEventListener('click', (e) => {
+      if (!Basic.openPopoverNodeId) return;
+      const popover = document.getElementById('basic-rt-popover');
+      if (popover.contains(e.target)) return;
+      if (e.target.closest('[data-node-id]')) return;
+      closeBasicRtPopover();
+    });
+
+    basicLog('sys', '準備完了。「送信」ボタンを押してPC-1からPC-2へパケットを送ってみましょう。');
   }
 
   function initFixedMode() {
@@ -3245,23 +3517,29 @@
    * ------------------------------------------------------------------ */
 
   function initTabs() {
+    const tabBasic = document.getElementById('tab-basic');
     const tabFixed = document.getElementById('tab-fixed');
     const tabFree = document.getElementById('tab-free');
+    const panelBasic = document.getElementById('panel-basic');
     const panelFixed = document.getElementById('panel-fixed');
     const panelFree = document.getElementById('panel-free');
+    const advToggleWrap = document.getElementById('advanced-mode-toggle-wrap');
 
     function activate(which) {
-      const isFixed = which === 'fixed';
-      if (isFixed && typeof closeIpPopover === 'function') closeIpPopover();
-      tabFixed.classList.toggle('is-active', isFixed);
-      tabFree.classList.toggle('is-active', !isFixed);
-      tabFixed.setAttribute('aria-selected', String(isFixed));
-      tabFree.setAttribute('aria-selected', String(!isFixed));
-      panelFixed.classList.toggle('is-hidden', !isFixed);
-      panelFree.classList.toggle('is-hidden', isFixed);
-      panelFixed.hidden = !isFixed;
-      panelFree.hidden = isFixed;
+      if (typeof closeIpPopover === 'function') closeIpPopover();
+      if (typeof closeFixedRtPopover === 'function') closeFixedRtPopover();
+      if (typeof closeBasicRtPopover === 'function') closeBasicRtPopover();
+      [['basic', tabBasic, panelBasic], ['fixed', tabFixed, panelFixed], ['free', tabFree, panelFree]].forEach(([name, tab, panel]) => {
+        const active = name === which;
+        tab.classList.toggle('is-active', active);
+        tab.setAttribute('aria-selected', String(active));
+        panel.classList.toggle('is-hidden', !active);
+        panel.hidden = !active;
+      });
+      // 基本編は常に簡易モード相当のため、「詳細モード」切替はここでは意味を持たない
+      if (advToggleWrap) advToggleWrap.classList.toggle('is-hidden', which === 'basic');
     }
+    tabBasic.addEventListener('click', () => activate('basic'));
     tabFixed.addEventListener('click', () => activate('fixed'));
     tabFree.addEventListener('click', () => activate('free'));
   }
@@ -3438,6 +3716,7 @@
     initHelpOverlay();
     initPauseButtons();
     initModal();
+    initBasicMode();
     initFixedMode();
     initFreeMode();
   });

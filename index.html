@@ -27,13 +27,14 @@
     </div>
 
     <nav class="tabs" role="tablist" aria-label="トポロジモード">
-      <button class="tab-btn is-active" id="tab-fixed" role="tab" aria-selected="true" aria-controls="panel-fixed">固定トポロジ</button>
+      <button class="tab-btn is-active" id="tab-basic" role="tab" aria-selected="true" aria-controls="panel-basic">固定トポロジ（基本）</button>
+      <button class="tab-btn" id="tab-fixed" role="tab" aria-selected="false" aria-controls="panel-fixed">固定トポロジ（応用）</button>
       <button class="tab-btn" id="tab-free" role="tab" aria-selected="false" aria-controls="panel-free">自由配置</button>
     </nav>
 
     <div class="topbar-tools">
       <button class="btn btn-ghost" id="help-btn">📖 使い方</button>
-      <label class="check-label theme-toggle-label" for="advanced-mode-toggle">
+      <label class="check-label theme-toggle-label" for="advanced-mode-toggle" id="advanced-mode-toggle-wrap">
         <input type="checkbox" id="advanced-mode-toggle">
         詳細モード
       </label>
@@ -44,8 +45,47 @@
     </div>
   </header>
 
-  <!-- ===================== 固定トポロジ ===================== -->
-  <main class="panel" id="panel-fixed" role="tabpanel" aria-labelledby="tab-fixed">
+  <!-- ===================== 固定トポロジ（基本） ===================== -->
+  <main class="panel" id="panel-basic" role="tabpanel" aria-labelledby="tab-basic">
+
+    <section class="stage">
+      <div class="stage-toolbar">
+        <div class="toolbar-group">
+          <label class="field-label" for="basic-fail-rate">自動障害発生確率</label>
+          <input type="range" id="basic-fail-rate" min="0" max="60" step="5" value="15">
+          <output id="basic-fail-rate-out" class="field-value">15%</output>
+        </div>
+        <button class="btn btn-warning" id="basic-reset-links">全リンク復旧</button>
+        <button class="btn btn-danger" id="basic-reset-all">初期状態に戻す</button>
+        <button class="btn btn-ghost" id="basic-pause-toggle">⏸ 一時停止</button>
+      </div>
+
+      <div class="stage-canvas-wrap">
+        <svg id="basic-svg" class="topo-svg" viewBox="0 0 1160 560" preserveAspectRatio="xMidYMid meet" aria-label="ネットワーク構成図（基本）"></svg>
+        <div class="ip-popover is-hidden" id="basic-rt-popover"></div>
+      </div>
+      <p class="stage-hint">PC-1からPC-2までは一本道です。ルーターをクリック（スマホは長押し）するとルーティングテーブルを表示。リンクをクリックすると障害のON/OFFを切り替えられます。</p>
+    </section>
+
+    <aside class="sidebar">
+      <section class="card">
+        <h2 class="card-title">パケット送信</h2>
+        <p class="micro-hint">PC-1（192.168.1.11）から PC-2（192.168.2.11）へ送信します。</p>
+        <button class="btn btn-primary" id="basic-send-btn">パケットを送信</button>
+        <p class="micro-hint" id="basic-send-status"></p>
+      </section>
+
+      <section class="card card-grow">
+        <div class="card-title-row">
+          <h2 class="card-title">ログ<span class="log-badge" id="basic-log-badge" hidden>0</span></h2>
+        </div>
+        <div id="basic-log" class="log" aria-live="polite"></div>
+      </section>
+    </aside>
+  </main>
+
+  <!-- ===================== 固定トポロジ（応用） ===================== -->
+  <main class="panel is-hidden" id="panel-fixed" role="tabpanel" aria-labelledby="tab-fixed" hidden>
 
     <section class="stage">
       <div class="stage-toolbar">
