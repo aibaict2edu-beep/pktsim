@@ -516,6 +516,24 @@ input[type="range"]{
   font-weight: 800;
   text-anchor: middle;
 }
+.port-ip-label{
+  fill: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.port-ip-label{
+  fill: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
 
 .pkt-dot{
   fill: var(--signal);

@@ -777,6 +777,22 @@
         html += `<text class="link-cost${l.down ? ' is-down' : ''}" data-link-id="${l.id}" style="cursor:${clickable ? 'pointer' : 'default'}" x="${mx}" y="${labelY + 5}" text-anchor="middle">${label}</text>`;
         if (l.down) html += warningTriangleMarkup(mx + 32, labelY);
       }
+
+      // ポートのIPアドレス表示（ルーターが関わるリンクの、ルーター側の端に）
+      if (state.showPortIps && (a.type === 'router' || b.type === 'router')) {
+        const dx = pts.x2 - pts.x1, dy = pts.y2 - pts.y1;
+        const len = Math.hypot(dx, dy) || 1;
+        const ux = dx / len, uy = dy / len;
+        const offset = 26;
+        if (a.type === 'router') {
+          const ip = ifaceIpForLink(a, l);
+          if (ip) html += portIpLabelMarkup(pts.x1 + ux * offset, pts.y1 + uy * offset, ip);
+        }
+        if (b.type === 'router') {
+          const ip = ifaceIpForLink(b, l);
+          if (ip) html += portIpLabelMarkup(pts.x2 - ux * offset, pts.y2 - uy * offset, ip);
+        }
+      }
     });
 
     // 送信中／送信済みの経路を表すフロー（流れるライン）オーバーレイ
@@ -857,6 +873,11 @@
   }
 
   // 道路標識風の警告マーク（黄色地に黒の三角形＋！）。絵文字を使わず、機種によらず同じ見た目にする
+  // ルーターのポート（インタフェース）のIPアドレスを、リンクのルーター側の端に小さく控えめに表示する
+  function portIpLabelMarkup(x, y, ip) {
+    return `<text class="port-ip-label" x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle">${ip}</text>`;
+  }
+
   function warningTriangleMarkup(cx, cy) {
     const s = 8;
     const p1 = `${cx},${cy - s}`;
@@ -1427,7 +1448,8 @@
     arpCache: new Set(),
     simpleMode: true,
     paused: false,
-    showPeriodicLog: false
+    showPeriodicLog: false,
+    showPortIps: true
   };
 
   const Fixed = {
@@ -1456,7 +1478,8 @@
     arpCache: new Set(),
     simpleMode: true,
     paused: false,
-    showPeriodicLog: false
+    showPeriodicLog: false,
+    showPortIps: false
   };
 
   function fixedValidate() {
@@ -1480,6 +1503,7 @@
       pulses: Fixed.pulses,
       nodeFlashes: Fixed.nodeFlashes,
       speedFactor: Fixed.speedFactor,
+      showPortIps: Fixed.showPortIps,
       errorNodeIds: new Set(Array.from(Fixed.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
     });
     fixedRenderRouteCompare(Fixed.lastChosenPath);
@@ -1738,6 +1762,7 @@
           hoverNodeId: Fixed.hoverNodeId,
           flows: Fixed.flows,
           speedFactor: Fixed.speedFactor,
+          showPortIps: Fixed.showPortIps,
           errorNodeIds: new Set(Array.from(Fixed.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
         });
         fixedUpdateSendButtonState();
@@ -1899,6 +1924,7 @@
       pulses: Basic.pulses,
       nodeFlashes: Basic.nodeFlashes,
       speedFactor: Basic.speedFactor,
+      showPortIps: Basic.showPortIps,
       errorNodeIds: new Set()
     });
     const btn = document.getElementById('basic-send-btn');
@@ -2261,6 +2287,11 @@
       }
     });
 
+    document.getElementById('port-ip-toggle').addEventListener('change', (e) => {
+      Fixed.showPortIps = e.target.checked;
+      fixedRender();
+    });
+
     document.getElementById('drift-toggle').addEventListener('change', (e) => {
       Fixed.driftEnabled = e.target.checked;
       if (Fixed.driftEnabled) {
@@ -2415,7 +2446,8 @@
     arpCache: new Set(),
     simpleMode: true,
     paused: false,
-    showPeriodicLog: false
+    showPeriodicLog: false,
+    showPortIps: false
   };
 
   function freeLog(level, msg, delay) { makeLogger(Free.logEl, Free.logBadge)(level, msg, delay); }
@@ -2980,6 +3012,7 @@
       pulses: Free.pulses,
       nodeFlashes: Free.nodeFlashes,
       speedFactor: Free.speedFactor,
+      showPortIps: Free.showPortIps,
       errorNodeIds: new Set(Array.from(Free.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
     });
   }
@@ -3415,6 +3448,10 @@
       Free.flows = [];
       freeLog('sys', 'パケットの軌跡をクリアしました');
       freeRender();
+    });
+    document.getElementById('free-port-ip-toggle').addEventListener('change', (e) => {
+      Free.showPortIps = e.target.checked;
+      freeRenderSvg();
     });
     document.getElementById('free-send-btn').addEventListener('click', freeSend);
     document.getElementById('free-src-pc').addEventListener('change', freeRenderRouteCompare);
