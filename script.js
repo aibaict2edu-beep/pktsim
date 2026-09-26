@@ -768,12 +768,14 @@
 
       if (l.routable) {
         const mx = (pts.x1 + pts.x2) / 2, my = (pts.y1 + pts.y2) / 2;
-        const label = l.down ? '⚠ DOWN ⚠' : String(l.cost);
+        const label = l.down ? 'DOWN' : String(l.cost);
         const bw = l.down ? 92 : 30;
         const bh = l.down ? 23 : 24;
         const labelY = l.down ? my : my - 14; // コスト値は上にずらす。DOWNは位置そのまま
         html += `<rect class="link-cost-bg${l.down ? ' is-down' : ''}" data-link-id="${l.id}" style="cursor:${clickable ? 'pointer' : 'default'}" x="${mx - bw / 2}" y="${labelY - bh / 2}" width="${bw}" height="${bh}" rx="3"></rect>`;
+        if (l.down) html += warningTriangleMarkup(mx - 32, labelY);
         html += `<text class="link-cost${l.down ? ' is-down' : ''}" data-link-id="${l.id}" style="cursor:${clickable ? 'pointer' : 'default'}" x="${mx}" y="${labelY + 5}" text-anchor="middle">${label}</text>`;
+        if (l.down) html += warningTriangleMarkup(mx + 32, labelY);
       }
     });
 
@@ -852,6 +854,18 @@
       });
     });
     return html;
+  }
+
+  // 道路標識風の警告マーク（黄色地に黒の三角形＋！）。絵文字を使わず、機種によらず同じ見た目にする
+  function warningTriangleMarkup(cx, cy) {
+    const s = 8;
+    const p1 = `${cx},${cy - s}`;
+    const p2 = `${(cx - s).toFixed(1)},${(cy + s * 0.8).toFixed(1)}`;
+    const p3 = `${(cx + s).toFixed(1)},${(cy + s * 0.8).toFixed(1)}`;
+    return `<g class="link-warn-mark">
+      <polygon points="${p1} ${p2} ${p3}"></polygon>
+      <text x="${cx}" y="${(cy + s * 0.55).toFixed(1)}" text-anchor="middle">!</text>
+    </g>`;
   }
 
   function packetIconMarkup(color, motionPath, dur, staticX, staticY) {
