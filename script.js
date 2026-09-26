@@ -583,8 +583,8 @@
     }
 
     addNode('basic-pc-1', 'pc', 'PC-1', '192.168.1.11', randMac(0x81), 90, 280, { mask: '/24', gateway: '192.168.1.250' });
-    addNode('basic-rt-1', 'router', 'RT-1', '192.168.1.250', randMac(0x82), 420, withDetour ? 350 : 280);
-    addNode('basic-rt-2', 'router', 'RT-2', '192.168.2.250', randMac(0x83), 760, withDetour ? 350 : 280);
+    addNode('basic-rt-1', 'router', 'RT-1', '192.168.1.250', randMac(0x82), 378, withDetour ? 350 : 280);
+    addNode('basic-rt-2', 'router', 'RT-2', '192.168.2.250', randMac(0x83), 802, withDetour ? 350 : 280);
     addNode('basic-pc-2', 'pc', 'PC-2', '192.168.2.11', randMac(0x84), 1080, 280, { mask: '/24', gateway: '192.168.2.250' });
 
     addLink('basic-pc1-rt1', 'basic-pc-1', 'basic-rt-1', 0, false);
@@ -2061,8 +2061,44 @@
     if (detourBtn) detourBtn.classList.toggle('is-active', mode === 'detour');
   }
 
-  function basicDefaultFileName() {
+  function fixedDefaultFileName() {
     const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return `packetpath-fixed-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  }
+
+  function fixedExportTopology() {
+    return {
+      version: 1,
+      nodes: Array.from(Fixed.topo.nodes.entries()).map(([id, n]) => [id, Object.assign({}, n)]),
+      links: Fixed.topo.links.map((l) => {
+        const copy = Object.assign({}, l);
+        delete copy._recoveryTimer;
+        return copy;
+      }),
+      usedNumbers: { pc: [], switch: [], router: [] },
+      nextSlotIndex: Fixed.topo.nodes.size,
+      ifaceCounter: 0
+    };
+  }
+
+  function fixedSaveToFile() {
+    const fileName = window.prompt('保存するファイル名を入力してください', fixedDefaultFileName());
+    if (!fileName) return;
+    const data = fixedExportTopology();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName.toLowerCase().endsWith('.json') ? fileName : fileName + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    fixedLog('sys', `ネットワーク構成を「${a.download}」として保存しました（「自由配置」タブの「読込」から続きを編集できます）`);
+  }
+
+  function basicDefaultFileName() {    const d = new Date();
     const pad = (n) => String(n).padStart(2, '0');
     return `packetpath-basic-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
   }
@@ -2310,6 +2346,8 @@
       fixedLog('sys', 'パケットの軌跡をクリアしました');
       fixedRender();
     });
+
+    document.getElementById('fixed-save').addEventListener('click', fixedSaveToFile);
 
     document.getElementById('port-ip-toggle').addEventListener('change', (e) => {
       Fixed.showPortIps = e.target.checked;
