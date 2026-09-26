@@ -50,6 +50,11 @@
 
     <section class="stage">
       <div class="stage-toolbar">
+        <div class="toolbar-group free-tools">
+          <span class="field-label">経路</span>
+          <button class="btn btn-tool is-active" id="basic-route-single">経路1本</button>
+          <button class="btn btn-tool" id="basic-route-detour">経路2本（迂回路あり）</button>
+        </div>
         <div class="toolbar-group">
           <label class="field-label" for="basic-fail-rate">自動障害発生確率</label>
           <input type="range" id="basic-fail-rate" min="0" max="60" step="5" value="15">
@@ -58,6 +63,7 @@
         <button class="btn btn-warning" id="basic-reset-links">全リンク復旧</button>
         <button class="btn btn-danger" id="basic-reset-all">初期状態に戻す</button>
         <button class="btn btn-ghost" id="basic-pause-toggle">⏸ 一時停止</button>
+        <button class="btn btn-ghost" id="basic-save">💾 保存</button>
       </div>
 
       <div class="stage-canvas-wrap">

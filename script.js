@@ -569,7 +569,7 @@
   }
 
   // 「固定トポロジ（基本）」：PC-1 -- RT-1 -- RT-2 -- PC-2 の一本道（スイッチなし、迂回路なし）
-  function makeBasicTopology() {
+  function makeBasicTopology(withDetour) {
     const nodes = new Map();
     const links = [];
     function addNode(id, type, name, ip, mac, x, y, extra) {
@@ -583,8 +583,8 @@
     }
 
     addNode('basic-pc-1', 'pc', 'PC-1', '192.168.1.11', randMac(0x81), 90, 280, { mask: '/24', gateway: '192.168.1.250' });
-    addNode('basic-rt-1', 'router', 'RT-1', '192.168.1.250', randMac(0x82), 420, 280);
-    addNode('basic-rt-2', 'router', 'RT-2', '192.168.2.250', randMac(0x83), 760, 280);
+    addNode('basic-rt-1', 'router', 'RT-1', '192.168.1.250', randMac(0x82), 420, withDetour ? 350 : 280);
+    addNode('basic-rt-2', 'router', 'RT-2', '192.168.2.250', randMac(0x83), 760, withDetour ? 350 : 280);
     addNode('basic-pc-2', 'pc', 'PC-2', '192.168.2.11', randMac(0x84), 1080, 280, { mask: '/24', gateway: '192.168.2.250' });
 
     addLink('basic-pc1-rt1', 'basic-pc-1', 'basic-rt-1', 0, false);
@@ -595,6 +595,17 @@
     const rt1 = nodes.get('basic-rt-1'), rt2 = nodes.get('basic-rt-2');
     rt1.ifaces['basic-rt1-rt2'] = { ip: '10.0.0.1', mask: '/24' };
     rt2.ifaces['basic-rt1-rt2'] = { ip: '10.0.0.2', mask: '/24' };
+
+    if (withDetour) {
+      addNode('basic-rt-3', 'router', 'RT-3', null, randMac(0x85), 590, 120);
+      addLink('basic-rt1-rt3', 'basic-rt-1', 'basic-rt-3', 1, true);
+      addLink('basic-rt3-rt2', 'basic-rt-3', 'basic-rt-2', 1, true);
+      const rt3 = nodes.get('basic-rt-3');
+      rt1.ifaces['basic-rt1-rt3'] = { ip: '10.0.1.1', mask: '/24' };
+      rt3.ifaces['basic-rt1-rt3'] = { ip: '10.0.1.2', mask: '/24' };
+      rt3.ifaces['basic-rt3-rt2'] = { ip: '10.0.2.1', mask: '/24' };
+      rt2.ifaces['basic-rt3-rt2'] = { ip: '10.0.2.2', mask: '/24' };
+    }
     return topo;
   }
 
@@ -1377,7 +1388,8 @@
    * ------------------------------------------------------------------ */
 
   const Basic = {
-    topo: makeBasicTopology(),
+    topo: makeBasicTopology(false),
+    routeMode: 'single',
     svg: null,
     logEl: null,
     logBadge: null,
@@ -1965,7 +1977,7 @@
     stopRvTimer(Basic);
     Basic.topo.links.forEach((l) => { if (l._recoveryTimer) clearTimeout(l._recoveryTimer); });
     closeBasicRtPopover();
-    Basic.topo = makeBasicTopology();
+    Basic.topo = makeBasicTopology(Basic.routeMode === 'detour');
     Basic.flows = [];
     Basic.pulses = [];
     Basic.nodeFlashes = [];
@@ -1976,6 +1988,60 @@
     startRvTimer(Basic, Basic.topo, basicRender, basicLog);
     basicRender();
     if (!silent) basicLog('sys', '固定トポロジ（基本）を初期状態に戻しました');
+  }
+
+  function basicSetRouteMode(mode) {
+    if (Basic.routeMode === mode) return;
+    Basic.routeMode = mode;
+    basicResetToInitial(true);
+    basicLog('sys', mode === 'detour'
+      ? 'RT-3を経由する迂回路を追加しました（RT-1—RT-2間がダウンすると自動的に迂回します）'
+      : '迂回路のないシンプルな一本道に戻しました');
+    const singleBtn = document.getElementById('basic-route-single');
+    const detourBtn = document.getElementById('basic-route-detour');
+    if (singleBtn) singleBtn.classList.toggle('is-active', mode === 'single');
+    if (detourBtn) detourBtn.classList.toggle('is-active', mode === 'detour');
+  }
+
+  function basicDefaultFileName() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return `packetpath-basic-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  }
+
+  function basicExportTopology() {
+    return {
+      version: 1,
+      nodes: Array.from(Basic.topo.nodes.entries()).map(([id, n]) => [id, Object.assign({}, n)]),
+      links: Basic.topo.links.map((l) => {
+        const copy = Object.assign({}, l);
+        delete copy._recoveryTimer;
+        return copy;
+      }),
+      usedNumbers: {
+        pc: [1, 2],
+        switch: [],
+        router: Basic.routeMode === 'detour' ? [1, 2, 3] : [1, 2]
+      },
+      nextSlotIndex: Basic.topo.nodes.size,
+      ifaceCounter: 0
+    };
+  }
+
+  function basicSaveToFile() {
+    const fileName = window.prompt('保存するファイル名を入力してください', basicDefaultFileName());
+    if (!fileName) return;
+    const data = basicExportTopology();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName.toLowerCase().endsWith('.json') ? fileName : fileName + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    basicLog('sys', `ネットワーク構成を「${a.download}」として保存しました（「自由配置」タブの「読込」から続きを編集できます）`);
   }
 
   function initBasicMode() {
@@ -2003,6 +2069,10 @@
     document.getElementById('basic-reset-all').addEventListener('click', () => {
       if (window.confirm('固定トポロジ（基本）を初期状態に戻します。よろしいですか？')) basicResetToInitial(false);
     });
+
+    document.getElementById('basic-route-single').addEventListener('click', () => basicSetRouteMode('single'));
+    document.getElementById('basic-route-detour').addEventListener('click', () => basicSetRouteMode('detour'));
+    document.getElementById('basic-save').addEventListener('click', basicSaveToFile);
 
     const basicPauseBtn = document.getElementById('basic-pause-toggle');
     basicPauseBtn.addEventListener('click', () => {
