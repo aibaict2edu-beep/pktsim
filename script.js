@@ -233,14 +233,15 @@
     segments.forEach((seg) => {
       if (seg.repId === routerId) return;
       const entry = vec[seg.repId];
-      if (!entry) { rows.push({ network: seg.label, nextHop: '—', metric: '未学習', type: 'unreachable' }); return; }
+      if (!entry) { rows.push({ network: seg.label, nextHop: '—', iface: '—', metric: '未学習', type: 'unreachable' }); return; }
       if (entry.nextHop === null) {
-        rows.push({ network: seg.label, nextHop: '直結', metric: entry.cost, type: 'connected' });
+        rows.push({ network: seg.label, nextHop: '直結', iface: '自ネットワーク', metric: entry.cost, type: 'connected' });
       } else if (entry.cost >= rvInf(topology)) {
-        rows.push({ network: seg.label, nextHop: '—', metric: '不通', type: 'unreachable' });
+        rows.push({ network: seg.label, nextHop: '—', iface: '—', metric: '不通', type: 'unreachable' });
       } else {
         const nextHopNode = topology.nodes.get(entry.nextHop);
-        rows.push({ network: seg.label, nextHop: nextHopNode ? nextHopNode.name : '?', metric: entry.cost, type: 'remote' });
+        const ifaceLabel = nextHopNode ? `→ ${nextHopNode.name} 側` : '?';
+        rows.push({ network: seg.label, nextHop: nextHopNode ? nextHopNode.name : '?', iface: ifaceLabel, metric: entry.cost, type: 'remote' });
       }
     });
 
@@ -1532,6 +1533,10 @@
 
   /* ---- ルーティングテーブル ポップオーバー（クリックしたルーターの経路情報） ---- */
 
+  function metricColumnLabel(simpleMode) {
+    return simpleMode ? 'ホップ数' : 'メトリック';
+  }
+
   function fixedRoutingTableHtml(router) {
     const segments = computeNetworkSegments(Fixed.topo);
     const { rows, emptyNote } = computeRoutingTable(Fixed.topo, router.id, segments);
@@ -1541,10 +1546,11 @@
     const body = rows.map((r) => `<tr>
         <td>${r.network}</td>
         <td>${r.nextHop}</td>
+        <td>${r.iface}</td>
         <td class="${r.type === 'unreachable' ? 'rt-down' : ''}">${r.metric}</td>
       </tr>`).join('');
     return `<table class="rt-tbl">
-      <tr><th>宛先ネットワーク</th><th>ネクストホップ</th><th>メトリック</th></tr>
+      <tr><th>宛先ネットワーク</th><th>ネクストホップ</th><th>インタフェース</th><th>${metricColumnLabel(Fixed.simpleMode)}</th></tr>
       ${body}
     </table>`;
   }
@@ -2317,10 +2323,11 @@
         const trs = rows.map((r) => `<tr>
             <td>${r.network}</td>
             <td>${r.nextHop}</td>
+            <td>${r.iface}</td>
             <td class="${r.type === 'unreachable' ? 'rt-down' : ''}">${r.metric}</td>
           </tr>`).join('');
         rtHtml = `<table class="rt-tbl">
-          <tr><th>宛先ネットワーク</th><th>ネクストホップ</th><th>メトリック</th></tr>
+          <tr><th>宛先ネットワーク</th><th>ネクストホップ</th><th>インタフェース</th><th>${metricColumnLabel(Free.simpleMode)}</th></tr>
           ${trs}
         </table>`;
       }
