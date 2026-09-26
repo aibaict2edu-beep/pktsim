@@ -235,13 +235,15 @@
       const entry = vec[seg.repId];
       if (!entry) { rows.push({ network: seg.label, nextHop: '—', iface: '—', metric: '未学習', type: 'unreachable' }); return; }
       if (entry.nextHop === null) {
-        rows.push({ network: seg.label, nextHop: '直結', iface: '自ネットワーク', metric: entry.cost, type: 'connected' });
+        const ifaceIp = ifaceIpForDirectSegment(topology, routerId, seg.repId);
+        rows.push({ network: seg.label, nextHop: '直結', iface: ifaceIp || '—', metric: entry.cost, type: 'connected' });
       } else if (entry.cost >= rvInf(topology)) {
         rows.push({ network: seg.label, nextHop: '—', iface: '—', metric: '不通', type: 'unreachable' });
       } else {
         const nextHopNode = topology.nodes.get(entry.nextHop);
-        const ifaceLabel = nextHopNode ? `→ ${nextHopNode.name} 側` : '?';
-        rows.push({ network: seg.label, nextHop: nextHopNode ? nextHopNode.name : '?', iface: ifaceLabel, metric: entry.cost, type: 'remote' });
+        const nextHopLink = topology.links.find((l) => !l.down && ((l.a === routerId && l.b === entry.nextHop) || (l.b === routerId && l.a === entry.nextHop)));
+        const ifaceIp = nextHopLink ? ifaceIpForLink(router, nextHopLink) : null;
+        rows.push({ network: seg.label, nextHop: nextHopNode ? nextHopNode.name : '?', iface: ifaceIp || '—', metric: entry.cost, type: 'remote' });
       }
     });
 
@@ -307,6 +309,46 @@
   const RV_INTERVAL_MS = 2500;
 
   // routerIdから他のルーターを跨がずに（スイッチ経由のみで）segRepIdへ到達できるか
+  // 指定したリンクにおける、そのルーター自身のインタフェースIPを返す
+  function ifaceIpForLink(router, link) {
+    if (!router || !link) return null;
+    if (router.ifaces && router.ifaces[link.id]) return router.ifaces[link.id].ip;
+    if (router.ip) return router.ip; // 固定トポロジのPC側インタフェース（ifacesに含まれない特別な1本）
+    return null;
+  }
+
+  // 直結セグメントへ向かう、自分自身のインタフェースIPを探す（スイッチ経由・他ルーターは跨がない）
+  function ifaceIpForDirectSegment(topo, routerId, segRepId) {
+    const router = topo.nodes.get(routerId);
+    if (!router) return null;
+    const ownLinks = topo.links.filter((l) => (l.a === routerId || l.b === routerId) && !l.down);
+    for (const link of ownLinks) {
+      const other = link.a === routerId ? link.b : link.a;
+      if (other === segRepId) return ifaceIpForLink(router, link);
+      const otherNode = topo.nodes.get(other);
+      if (!otherNode || otherNode.type !== 'switch') continue;
+      const visited = new Set([routerId, other]);
+      const queue = [other];
+      let found = false;
+      while (queue.length) {
+        const cur = queue.shift();
+        const adj = topo.links.filter((l2) => (l2.a === cur || l2.b === cur) && !l2.down);
+        for (const l2 of adj) {
+          const o2 = l2.a === cur ? l2.b : l2.a;
+          if (visited.has(o2)) continue;
+          if (o2 === segRepId) { found = true; break; }
+          const n2 = topo.nodes.get(o2);
+          if (n2 && n2.type === 'router') continue;
+          visited.add(o2);
+          queue.push(o2);
+        }
+        if (found) break;
+      }
+      if (found) return ifaceIpForLink(router, link);
+    }
+    return null;
+  }
+
   function rvIsDirectlyConnected(topo, routerId, segRepId) {
     if (routerId === segRepId) return false;
     const visited = new Set([routerId]);
