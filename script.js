@@ -768,11 +768,11 @@
 
       if (l.routable) {
         const mx = (pts.x1 + pts.x2) / 2, my = (pts.y1 + pts.y2) / 2;
-        const label = l.down ? 'DOWN' : String(l.cost);
-        const bw = l.down ? 58 : 30;
+        const label = l.down ? '⚠ DOWN ⚠' : String(l.cost);
+        const bw = l.down ? 92 : 30;
         const bh = l.down ? 23 : 24;
         const labelY = l.down ? my : my - 14; // コスト値は上にずらす。DOWNは位置そのまま
-        html += `<rect class="link-cost-bg" data-link-id="${l.id}" style="cursor:${clickable ? 'pointer' : 'default'}" x="${mx - bw / 2}" y="${labelY - bh / 2}" width="${bw}" height="${bh}" rx="3"></rect>`;
+        html += `<rect class="link-cost-bg${l.down ? ' is-down' : ''}" data-link-id="${l.id}" style="cursor:${clickable ? 'pointer' : 'default'}" x="${mx - bw / 2}" y="${labelY - bh / 2}" width="${bw}" height="${bh}" rx="3"></rect>`;
         html += `<text class="link-cost${l.down ? ' is-down' : ''}" data-link-id="${l.id}" style="cursor:${clickable ? 'pointer' : 'default'}" x="${mx}" y="${labelY + 5}" text-anchor="middle">${label}</text>`;
       }
     });

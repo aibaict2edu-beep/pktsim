@@ -500,7 +500,8 @@ input[type="range"]{
   fill: var(--text-dim);
 }
 .link-cost-bg{ fill: var(--strong-label-bg); }
-.link-cost.is-down{ fill: var(--danger); font-size: 17px; font-weight: 700; }
+.link-cost-bg.is-down{ stroke: var(--danger); stroke-width: 1.5; }
+.link-cost.is-down{ fill: #ffe14d; font-size: 17px; font-weight: 700; }
 
 .pkt-dot{
   fill: var(--signal);
