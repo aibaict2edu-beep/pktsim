@@ -2146,6 +2146,12 @@
       basicRender();
     });
 
+    document.getElementById('basic-clear-trails').addEventListener('click', () => {
+      Basic.flows = [];
+      basicLog('sys', 'パケットの軌跡をクリアしました');
+      basicRender();
+    });
+
     Basic.svg.addEventListener('click', (e) => {
       const nodeTarget = e.target.closest('[data-node-id]');
       if (nodeTarget) {
@@ -2297,6 +2303,12 @@
       if (window.confirm('固定トポロジを初期状態に戻します。リンク障害・コスト設定・メッシュ接続などがすべて元に戻ります。よろしいですか？')) {
         fixedResetToInitial(false);
       }
+    });
+
+    document.getElementById('clear-trails').addEventListener('click', () => {
+      Fixed.flows = [];
+      fixedLog('sys', 'パケットの軌跡をクリアしました');
+      fixedRender();
     });
 
     document.getElementById('port-ip-toggle').addEventListener('change', (e) => {
