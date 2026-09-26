@@ -96,6 +96,21 @@
     return [(u >>> 24) & 255, (u >>> 16) & 255, (u >>> 8) & 255, u & 255].join('.');
   }
 
+  // サブネットマスクの表示形式（アプリ全体共通）：'dotted'（255.255.255.0）または 'cidr'（/24）
+  // 保存される値そのものは変えず、画面に表示するときだけこの形式に変換する
+  let maskDisplayStyle = 'dotted';
+
+  function prefixToDottedMask(prefix) {
+    const maskBits = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+    return intToIp(maskBits);
+  }
+
+  function displayMask(rawMask) {
+    const prefix = parseMaskToPrefix(rawMask);
+    if (prefix === null) return rawMask; // 解釈できない場合はそのまま表示
+    return maskDisplayStyle === 'cidr' ? ('/' + prefix) : prefixToDottedMask(prefix);
+  }
+
   function networkLabelFor(ip, mask) {
     const ipInt = parseIp(ip);
     const prefix = parseMaskToPrefix(mask);
@@ -699,7 +714,8 @@
     if (!ip) return '';
     if (!mask) return ip;
     const prefix = parseMaskToPrefix(mask);
-    return prefix !== null ? `${ip}/${prefix}` : `${ip} ${mask}`;
+    if (prefix === null) return `${ip} ${mask}`;
+    return maskDisplayStyle === 'cidr' ? `${ip}/${prefix}` : `${ip} ${prefixToDottedMask(prefix)}`;
   }
 
 
@@ -1929,6 +1945,15 @@
 
   function basicLog(level, msg, delay) { makeLogger(Basic.logEl, Basic.logBadge)(level, msg, delay); }
 
+  function basicValidate() {
+    Basic.nodeErrors = validateTopologyIps(Basic.topo);
+  }
+
+  function basicHasAnyError() {
+    for (const rec of Basic.nodeErrors.values()) { if (rec.hasError) return true; }
+    return false;
+  }
+
   function basicRender() {
     renderTopology(Basic.svg, Basic.topo, {
       hoverNodeId: Basic.hoverNodeId,
@@ -1937,10 +1962,10 @@
       nodeFlashes: Basic.nodeFlashes,
       speedFactor: Basic.speedFactor,
       showPortIps: Basic.showPortIps,
-      errorNodeIds: new Set()
+      errorNodeIds: new Set(Array.from(Basic.nodeErrors.entries()).filter(([, v]) => v.hasError).map(([k]) => k))
     });
     const btn = document.getElementById('basic-send-btn');
-    if (btn) btn.disabled = Basic.paused;
+    if (btn) btn.disabled = Basic.paused || basicHasAnyError();
     if (Basic.openPopoverNodeId) {
       const n = Basic.topo.nodes.get(Basic.openPopoverNodeId);
       if (n) renderBasicRtPopoverContent(n); else closeBasicRtPopover();
@@ -1966,8 +1991,14 @@
   function renderBasicRtPopoverContent(node) {
     const pop = document.getElementById('basic-rt-popover');
     withFocusPreserved(pop, () => {
+      const errRec = Basic.nodeErrors.get(node.id) || { self: {} };
       let ipSection = '<div class="popover-section-title">IPアドレス設定</div>';
-      if (node.ip) ipSection += popoverIfaceBlockHtml(node.type === 'router' ? 'PC側インタフェース' : 'IPアドレス／マスク', node.ip, node.mask || '/24', null, 'top', false);
+      if (node.type === 'pc') {
+        // PCのIPアドレスは編集可能・サブネットマスクは固定（演習用）
+        ipSection += popoverIfaceBlockHtml('IPアドレス／マスク', node.ip, node.mask || '/24', errRec.self, 'self', true, false);
+      } else if (node.ip) {
+        ipSection += popoverIfaceBlockHtml('PC側インタフェース', node.ip, node.mask || '/24', null, 'top', false);
+      }
       Object.keys(node.ifaces || {}).forEach((linkId) => {
         const link = Basic.topo.links.find((l) => l.id === linkId);
         const otherId = link ? (link.a === node.id ? link.b : link.a) : null;
@@ -1979,6 +2010,13 @@
         : '';
       pop.innerHTML = `<div class="ip-popover-title"><span>${node.name} の設定</span><button type="button" class="ip-popover-close" id="basic-rt-popover-close">×</button></div>${ipSection}${rtSection}`;
       document.getElementById('basic-rt-popover-close').addEventListener('click', closeBasicRtPopover);
+      pop.querySelectorAll('.ip-field').forEach((input) => {
+        input.addEventListener('input', () => {
+          node.ip = input.value;
+          basicValidate();
+          basicRender();
+        });
+      });
     });
   }
 
@@ -2044,8 +2082,33 @@
     if (failRateEl) { failRateEl.value = 0; document.getElementById('basic-fail-rate-out').textContent = '0%'; }
     rvInitTables(Basic.topo, computeNetworkSegments(Basic.topo), false);
     startRvTimer(Basic, Basic.topo, basicRender, basicLog);
+    basicValidate();
     basicRender();
     if (!silent) basicLog('sys', '固定トポロジ（基本）を初期状態に戻しました');
+  }
+
+  function basicShowHint() {
+    if (basicHasAnyError()) {
+      basicLog('sys', 'ヒント: 赤い「!」が付いているPCがあります。まずはそこの入力欄のエラー内容を確認しましょう。');
+      return;
+    }
+    const pc1 = Basic.topo.nodes.get('basic-pc-1');
+    const pc2 = Basic.topo.nodes.get('basic-pc-2');
+    const rt1 = Basic.topo.nodes.get('basic-rt-1');
+    const rt2 = Basic.topo.nodes.get('basic-rt-2');
+    const pc1Prefix = parseMaskToPrefix(pc1.mask || '/24');
+    const rt1Prefix = parseMaskToPrefix(rt1.mask || '/24');
+    const pc2Prefix = parseMaskToPrefix(pc2.mask || '/24');
+    const rt2Prefix = parseMaskToPrefix(rt2.mask || '/24');
+    const msgs = [];
+    if (networkKey(pc1.ip, pc1Prefix) !== networkKey(rt1.ip, rt1Prefix)) {
+      msgs.push('PC-1と、PC-1が直接つながっているルーター（RT-1）のIPアドレスを見比べてみましょう。同じネットワークの範囲に入っていますか？');
+    }
+    if (networkKey(pc2.ip, pc2Prefix) !== networkKey(rt2.ip, rt2Prefix)) {
+      msgs.push('PC-2と、PC-2が直接つながっているルーター（RT-2）のIPアドレスを見比べてみましょう。同じネットワークの範囲に入っていますか？');
+    }
+    if (!msgs.length) msgs.push('今のところ、設定に問題は見当たりません。実際に送信して確かめてみましょう。');
+    msgs.forEach((m) => basicLog('sys', `ヒント: ${m}`));
   }
 
   function basicSetRouteMode(mode) {
@@ -2144,6 +2207,7 @@
     Basic.logBadge = document.getElementById('basic-log-badge');
     rvInitTables(Basic.topo, computeNetworkSegments(Basic.topo), false);
     startRvTimer(Basic, Basic.topo, basicRender, basicLog);
+    basicValidate();
     basicRender();
 
     document.getElementById('basic-send-btn').addEventListener('click', basicSend);
@@ -2188,11 +2252,13 @@
       basicRender();
     });
 
+    document.getElementById('basic-hint').addEventListener('click', basicShowHint);
+
     Basic.svg.addEventListener('click', (e) => {
       const nodeTarget = e.target.closest('[data-node-id]');
       if (nodeTarget) {
         const node = Basic.topo.nodes.get(nodeTarget.dataset.nodeId);
-        if (node && node.type === 'router') {
+        if (node && (node.type === 'router' || node.type === 'pc')) {
           if (Basic.openPopoverNodeId === node.id) closeBasicRtPopover(); else openBasicRtPopover(node.id);
         }
         return;
@@ -2213,7 +2279,7 @@
       const nodeTarget = e.target.closest('[data-node-id]');
       if (!nodeTarget) return;
       const node = Basic.topo.nodes.get(nodeTarget.dataset.nodeId);
-      if (!node || node.type !== 'router') return;
+      if (!node || (node.type !== 'router' && node.type !== 'pc')) return;
       e.preventDefault();
       openBasicRtPopover(node.id);
     });
@@ -2224,7 +2290,7 @@
       const nodeId = nodeTarget.dataset.nodeId;
       basicLongPressTimer = setTimeout(() => {
         const node = Basic.topo.nodes.get(nodeId);
-        if (node && node.type === 'router') openBasicRtPopover(node.id);
+        if (node && (node.type === 'router' || node.type === 'pc')) openBasicRtPopover(node.id);
       }, 550);
     }, { passive: true });
     ['touchend', 'touchmove', 'touchcancel'].forEach((evt) => {
@@ -2720,19 +2786,26 @@
     return '';
   }
 
-  function popoverIfaceBlockHtml(label, ip, mask, errObj, dataKey, editable) {
+  function popoverIfaceBlockHtml(label, ip, mask, errObj, dataKey, editable, maskEditable) {
+    if (maskEditable === undefined) maskEditable = editable;
     const hasErr = errObj && (errObj.format || errObj.reserved || errObj.dup || errObj.subnet);
-    if (!editable) {
+    if (!editable && !maskEditable) {
       return `<div class="iface-block">
         <div class="iface-label">${label}（固定）</div>
-        <div class="iface-row"><span class="iface-fixed-value">${ip || ''} ${mask || ''}</span></div>
+        <div class="iface-row"><span class="iface-fixed-value">${ip || ''} ${displayMask(mask)}</span></div>
       </div>`;
     }
+    const ipFieldHtml = editable
+      ? `<input type="text" class="ip-field ${hasErr ? 'has-error' : ''}" data-key="${dataKey}" data-field="ip" value="${ip || ''}" placeholder="192.168.1.1">`
+      : `<span class="iface-fixed-value">${ip || ''}</span>`;
+    const maskFieldHtml = maskEditable
+      ? `<input type="text" class="mask-input ${hasErr ? 'has-error' : ''}" data-key="${dataKey}" data-field="mask" value="${displayMask(mask)}" placeholder="255.255.255.0">`
+      : `<span class="iface-fixed-value mask-fixed">${displayMask(mask)}（固定）</span>`;
     return `<div class="iface-block">
       <div class="iface-label">${label}</div>
       <div class="iface-row">
-        <input type="text" class="ip-field ${hasErr ? 'has-error' : ''}" data-key="${dataKey}" data-field="ip" value="${ip || ''}" placeholder="192.168.1.1">
-        <input type="text" class="mask-input ${hasErr ? 'has-error' : ''}" data-key="${dataKey}" data-field="mask" value="${mask || ''}" placeholder="/24">
+        ${ipFieldHtml}
+        ${maskFieldHtml}
       </div>
       <div class="iface-error-msg">${popoverFieldErrorText(errObj)}</div>
     </div>`;
@@ -3744,6 +3817,17 @@
     });
   }
 
+  function initMaskStyleToggle() {
+    const toggle = document.getElementById('mask-style-toggle');
+    if (!toggle) return;
+    toggle.addEventListener('change', (e) => {
+      maskDisplayStyle = e.target.checked ? 'cidr' : 'dotted';
+      basicRender();
+      fixedRender();
+      freeRender();
+    });
+  }
+
   // 詳細⇔簡易モードの切替：状態をリセットせず、コスト・しきい値・発展機能だけを調整する
   function autoDisableAdvancedFeatures(store, topo, idPrefix) {
     let anyWasOn = false;
@@ -3904,6 +3988,7 @@
   document.addEventListener('DOMContentLoaded', () => {
     initTabs();
     initThemeToggle();
+    initMaskStyleToggle();
     initModeToggle();
     initHelpOverlay();
     initPauseButtons();
