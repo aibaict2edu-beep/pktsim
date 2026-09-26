@@ -878,7 +878,10 @@
   // 道路標識風の警告マーク（黄色地に黒の三角形＋！）。絵文字を使わず、機種によらず同じ見た目にする
   // ルーターのポート（インタフェース）のIPアドレスを、リンクのルーター側の端に小さく控えめに表示する
   function portIpLabelMarkup(x, y, ip) {
-    return `<text class="port-ip-label" x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle">${ip}</text>`;
+    const bw = ip.length * 6.4 + 8;
+    const bh = 15;
+    return `<rect class="port-ip-label-bg" x="${(x - bw / 2).toFixed(1)}" y="${(y - bh + 3).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh}" rx="2"></rect>
+      <text class="port-ip-label" x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle">${ip}</text>`;
   }
 
   function warningTriangleMarkup(cx, cy) {

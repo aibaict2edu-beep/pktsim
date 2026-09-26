@@ -459,7 +459,7 @@ input[type="range"]{
 .n-sub{
   fill: var(--text);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: 10.5px;
   text-anchor: middle;
 }
 .n-icon{ stroke: var(--text-dim); fill:none; stroke-width:1.4; }
@@ -519,12 +519,9 @@ input[type="range"]{
 .port-ip-label{
   fill: var(--text);
   font-family: var(--font-mono);
-  font-size: 9.5px;
-  paint-order: stroke;
-  stroke: var(--bg);
-  stroke-width: 3px;
-  stroke-linejoin: round;
+  font-size: 10.5px;
 }
+.port-ip-label-bg{ fill: var(--strong-label-bg); }
 
 .pkt-dot{
   fill: var(--signal);
