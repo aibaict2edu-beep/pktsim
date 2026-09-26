@@ -783,17 +783,23 @@
         const dx = pts.x2 - pts.x1, dy = pts.y2 - pts.y1;
         const len = Math.hypot(dx, dy) || 1;
         const ux = dx / len, uy = dy / len;
-        const offset = 26;
         let px = -uy, py = ux;
         if (py > 0) { px = -px; py = -py; } // 常に線の上側（画面上でY座標が小さい方）に統一する
         const vOffset = 10;
+        const gap = 14; // ルーターの箱の端からの最小すき間
         if (a.type === 'router') {
           const ip = ifaceIpForLink(a, l);
-          if (ip) html += portIpLabelMarkup(pts.x1 + ux * offset + px * vOffset, pts.y1 + uy * offset + py * vOffset, ip);
+          if (ip) {
+            const offset = gap + (ip.length * 7 + 8) / 2; // ラベル自体の幅ぶん、さらに外側へずらして箱に隠れないようにする
+            html += portIpLabelMarkup(pts.x1 + ux * offset + px * vOffset, pts.y1 + uy * offset + py * vOffset, ip);
+          }
         }
         if (b.type === 'router') {
           const ip = ifaceIpForLink(b, l);
-          if (ip) html += portIpLabelMarkup(pts.x2 - ux * offset + px * vOffset, pts.y2 - uy * offset + py * vOffset, ip);
+          if (ip) {
+            const offset = gap + (ip.length * 7 + 8) / 2;
+            html += portIpLabelMarkup(pts.x2 - ux * offset + px * vOffset, pts.y2 - uy * offset + py * vOffset, ip);
+          }
         }
       }
     });
