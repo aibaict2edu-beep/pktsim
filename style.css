@@ -517,18 +517,9 @@ input[type="range"]{
   text-anchor: middle;
 }
 .port-ip-label{
-  fill: var(--text-faint);
+  fill: var(--text);
   font-family: var(--font-mono);
-  font-size: 8.5px;
-  paint-order: stroke;
-  stroke: var(--bg);
-  stroke-width: 3px;
-  stroke-linejoin: round;
-}
-.port-ip-label{
-  fill: var(--text-faint);
-  font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-size: 9.5px;
   paint-order: stroke;
   stroke: var(--bg);
   stroke-width: 3px;

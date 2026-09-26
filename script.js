@@ -778,19 +778,22 @@
         if (l.down) html += warningTriangleMarkup(mx + 32, labelY);
       }
 
-      // ポートのIPアドレス表示（ルーターが関わるリンクの、ルーター側の端に）
+      // ポートのIPアドレス表示（ルーターが関わるリンクの、ルーター側の端に、線の上側へ少しずらして表示）
       if (state.showPortIps && (a.type === 'router' || b.type === 'router')) {
         const dx = pts.x2 - pts.x1, dy = pts.y2 - pts.y1;
         const len = Math.hypot(dx, dy) || 1;
         const ux = dx / len, uy = dy / len;
         const offset = 26;
+        let px = -uy, py = ux;
+        if (py > 0) { px = -px; py = -py; } // 常に線の上側（画面上でY座標が小さい方）に統一する
+        const vOffset = 10;
         if (a.type === 'router') {
           const ip = ifaceIpForLink(a, l);
-          if (ip) html += portIpLabelMarkup(pts.x1 + ux * offset, pts.y1 + uy * offset, ip);
+          if (ip) html += portIpLabelMarkup(pts.x1 + ux * offset + px * vOffset, pts.y1 + uy * offset + py * vOffset, ip);
         }
         if (b.type === 'router') {
           const ip = ifaceIpForLink(b, l);
-          if (ip) html += portIpLabelMarkup(pts.x2 - ux * offset, pts.y2 - uy * offset, ip);
+          if (ip) html += portIpLabelMarkup(pts.x2 - ux * offset + px * vOffset, pts.y2 - uy * offset + py * vOffset, ip);
         }
       }
     });
@@ -815,7 +818,7 @@
         <rect class="${boxCls}" x="${-size.w / 2}" y="${-size.h / 2}" width="${size.w}" height="${size.h}" rx="${isRouter ? 10 : 5}"></rect>
         ${nodeIconMarkup(n.type)}
         <text class="n-label" y="${size.h / 2 + 15}">${n.name}</text>
-        ${n.ip ? `<text class="n-sub" y="${size.h / 2 + 27}">${formatIpMask(n.ip, n.mask)}</text>` : ''}
+        ${n.ip && !(isRouter && state.showPortIps) ? `<text class="n-sub" y="${size.h / 2 + 27}">${formatIpMask(n.ip, n.mask)}</text>` : ''}
         ${hasError ? `<g class="n-error-badge" transform="translate(${size.w / 2 - 2},${-size.h / 2 + 2})"><circle r="11"></circle><text y="5">!</text></g>` : ''}
       </g>`;
     });
