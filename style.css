@@ -459,7 +459,7 @@ input[type="range"]{
 .n-sub{
   fill: var(--text);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11.5px;
   text-anchor: middle;
 }
 .n-icon{ stroke: var(--text-dim); fill:none; stroke-width:1.4; }
@@ -501,7 +501,7 @@ input[type="range"]{
 }
 .link-cost-bg{ fill: var(--strong-label-bg); }
 .link-cost-bg.is-down{ stroke: var(--danger); stroke-width: 1.5; }
-.link-cost.is-down{ fill: #ffe14d; font-size: 17px; font-weight: 700; }
+.link-cost.is-down{ fill: #ffe14d; font-size: 18px; font-weight: 700; }
 .link-warn-mark polygon{
   fill: #ffcc00;
   stroke: #6b4f00;
@@ -519,7 +519,7 @@ input[type="range"]{
 .port-ip-label{
   fill: var(--text);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11.5px;
 }
 .port-ip-label-bg{ fill: var(--strong-label-bg); }
 

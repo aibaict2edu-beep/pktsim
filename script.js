@@ -769,13 +769,13 @@
       if (l.routable) {
         const mx = (pts.x1 + pts.x2) / 2, my = (pts.y1 + pts.y2) / 2;
         const label = l.down ? 'DOWN' : String(l.cost);
-        const bw = l.down ? 92 : 30;
+        const bw = l.down ? 98 : 30;
         const bh = l.down ? 23 : 24;
         const labelY = l.down ? my : my - 14; // コスト値は上にずらす。DOWNは位置そのまま
         html += `<rect class="link-cost-bg${l.down ? ' is-down' : ''}" data-link-id="${l.id}" style="cursor:${clickable ? 'pointer' : 'default'}" x="${mx - bw / 2}" y="${labelY - bh / 2}" width="${bw}" height="${bh}" rx="3"></rect>`;
-        if (l.down) html += warningTriangleMarkup(mx - 32, labelY);
+        if (l.down) html += warningTriangleMarkup(mx - 34, labelY);
         html += `<text class="link-cost${l.down ? ' is-down' : ''}" data-link-id="${l.id}" style="cursor:${clickable ? 'pointer' : 'default'}" x="${mx}" y="${labelY + 5}" text-anchor="middle">${label}</text>`;
-        if (l.down) html += warningTriangleMarkup(mx + 32, labelY);
+        if (l.down) html += warningTriangleMarkup(mx + 34, labelY);
       }
 
       // ポートのIPアドレス表示（ルーターが関わるリンクの、ルーター側の端に、線の上側へ少しずらして表示）
@@ -878,8 +878,8 @@
   // 道路標識風の警告マーク（黄色地に黒の三角形＋！）。絵文字を使わず、機種によらず同じ見た目にする
   // ルーターのポート（インタフェース）のIPアドレスを、リンクのルーター側の端に小さく控えめに表示する
   function portIpLabelMarkup(x, y, ip) {
-    const bw = ip.length * 6.4 + 8;
-    const bh = 15;
+    const bw = ip.length * 7 + 8;
+    const bh = 16;
     return `<rect class="port-ip-label-bg" x="${(x - bw / 2).toFixed(1)}" y="${(y - bh + 3).toFixed(1)}" width="${bw.toFixed(1)}" height="${bh}" rx="2"></rect>
       <text class="port-ip-label" x="${x.toFixed(1)}" y="${y.toFixed(1)}" text-anchor="middle">${ip}</text>`;
   }
