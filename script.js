@@ -1393,7 +1393,7 @@
     svg: null,
     logEl: null,
     logBadge: null,
-    failRate: 15,
+    failRate: 0,
     hoverNodeId: null,
     flows: [],
     colorIdx: 0,
@@ -1422,7 +1422,7 @@
     logEl: null,
     logBadge: null,
     rtMode: 'preset',
-    failRate: 15,
+    failRate: 0,
     hoverNodeId: null,
     flows: [],
     colorIdx: 0,
@@ -1849,6 +1849,9 @@
     Fixed.autoRecoverEnabled = false;
     Fixed.speedFactor = 1;
     Fixed.coldStart = false;
+    Fixed.failRate = 0;
+    const failRateEl = document.getElementById('fail-rate');
+    if (failRateEl) { failRateEl.value = 0; document.getElementById('fail-rate-out').textContent = '0%'; }
     const meshToggleEl = document.getElementById('mesh-toggle');
     if (meshToggleEl) meshToggleEl.checked = false;
     const rtModeEl = document.getElementById('rt-mode');
@@ -1984,6 +1987,9 @@
     Basic.arpCache = new Set();
     Basic.colorIdx = 0;
     Basic.nodeErrors = new Map();
+    Basic.failRate = 0;
+    const failRateEl = document.getElementById('basic-fail-rate');
+    if (failRateEl) { failRateEl.value = 0; document.getElementById('basic-fail-rate-out').textContent = '0%'; }
     rvInitTables(Basic.topo, computeNetworkSegments(Basic.topo), false);
     startRvTimer(Basic, Basic.topo, basicRender, basicLog);
     basicRender();
@@ -2383,7 +2389,7 @@
     driftEnabled: false,
     driftFailRate: 5,
     driftTimer: null,
-    failRate: 15,
+    failRate: 0,
     autoRecoverEnabled: false,
     speedFactor: 1,
     undoStack: [],
@@ -3322,6 +3328,9 @@
     Free.autoRecoverEnabled = false;
     Free.speedFactor = 1;
     Free.coldStart = false;
+    Free.failRate = 0;
+    const failRateEl = document.getElementById('free-fail-rate');
+    if (failRateEl) { failRateEl.value = 0; document.getElementById('free-fail-rate-out').textContent = '0%'; }
     if (clearHistory) { Free.undoStack = []; Free.redoStack = []; }
     Free.topo.rvInfinity = Free.simpleMode ? SIMPLE_MODE_INFINITY : RV_INFINITY_DEFAULT;
     const driftToggleEl = document.getElementById('free-drift-toggle');
